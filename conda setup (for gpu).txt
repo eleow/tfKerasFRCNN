@@ -1,0 +1,43 @@
+
+-------
+Windows
+-------
+
+First, remove conda-forge from your channel list (if you do not have that, it will return error, but no issue)
+-------------------------------------------------------------------------------------------------------------
+
+	conda config --remove channels conda-forge
+
+
+Second, clean all the previously downloaded packages (to make sure after that you have installed the right packages)
+--------------------------------------------------------------------------------------------------------------------
+
+	conda clean --all
+
+(you might want to run the above twice if you encounter issue with your installed environment)
+
+
+Third, create the rtav environment
+----------------------------------
+
+	conda create -n rtav python=3.6
+
+
+Fourth, activate the rtav environment
+-------------------------------------
+
+	conda activate rtav
+
+
+Fifth, install opencv and some packages from conda-forge first
+--------------------------------------------------------------
+
+	conda install opencv=4.1.0 imutils=0.5.2 imgaug librosa -c conda-forge
+
+
+Finally, install the rest of the packages
+-----------------------------------------
+
+	conda install tensorflow=1.13.1 tensorflow-gpu=1.13.1 cudatoolkit=9.0 cudnn=7.1.4 spyder=3.3.2 cython=0.29.2 pathlib=1.0.1 ipython=7.2.0 yaml pandas keras keras-gpu pydot graphviz 
+
+(Assume Cuda 9.0 is installed, and cudnn 7.1.4 installed, get cudnn from https://developer.nvidia.com/rdp/cudnn-archive)
