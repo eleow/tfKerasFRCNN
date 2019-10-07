@@ -62,7 +62,6 @@ class FRCNN():
         if ('resnet' in base_net_type): base_net_type = 'resnet50'
         if ('vgg' in base_net_type): base_net_type = 'vgg'
 
-        # self.base_net_type = base_net_type
         if (base_net_type  != 'resnet50' and base_net_type != 'vgg'):
             print("Only resnet50 and vgg are currently supported as base models")
             raise ValueError
@@ -105,7 +104,7 @@ class FRCNN():
         # return model_all
 
     def inspect(self, generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,512], anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]):
-        """ Based on generator, get details of image, ground-truth annotations, as well as positive anchors
+        """ Based on generator, prints details of image, ground-truth annotations, as well as positive anchors
         Args:
             generator: Generator that was created via frcnn.FRCNNGenerator
             target_size: Target size of shorter side. This should be the same as what was passed into the generator
@@ -1932,20 +1931,28 @@ def viewAnnotatedImage(annotation_file, query_image_path, class_mapping, verbose
 
     windows_resize_image_path_file = query_image_path.replace('/', '\\')  # just in case annotation file is in windows directory format
 
-    # iterating over the image for different objects
+    textArr = []
+
+    # iterate over the image for different objects
     for _, r in annotations[(annotations.image_name == query_image_path) | (annotations.image_name == windows_resize_image_path_file)].iterrows():
 
         edgeColor = colorset[class_mapping[r.Object_type]]
 
-        # add bounding boxes to the image
-        # w = r.x2 - r.x1
-        # h = r.y2- r.y1
-        # ax.annotate(r.Object_type, xy=(r.x1, r.y1+5))
-        # rect = patches.Rectangle((r.x1,r.y1), w, h, edgecolor = edgeColor/255, facecolor = 'none')
-        # ax.add_patch(rect)
+        # ensure that our text is not out of image. Add to textArr, but don't draw text first
+        y = r.y1-5
+        if y < 10: y = r.y1+10
+        textArr.append((r.Object_type, (r.x1, y), edgeColor))
 
-        cv2.putText(img, r.Object_type, (r.x1, r.y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.5, edgeColor, 1, cv2.LINE_AA)
+        # draw bounding box
         cv2.rectangle(img, (r.x1, r.y1), (r.x2, r.y2), edgeColor, 2)
+
+    # draw text last, so that they will not be obscured by the rectangles
+    for t in textArr:
+        # draw text twice, once in outline color with double thickness, and once in the text color. This enables text to always be seen
+        cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, 255 - t[2], 2, cv2.LINE_AA)
+        cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, t[2], 1, cv2.LINE_AA)
+
+
 
     plt.grid()
     plt.imshow(img)
