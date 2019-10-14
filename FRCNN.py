@@ -41,7 +41,7 @@ import copy
 import os
 import sys
 
-
+tf.logging.set_verbosity(tf.logging.ERROR)
 DEBUG = False
 
 # class FRCNN(tf.keras.Model):
@@ -68,8 +68,10 @@ class FRCNN():
 
         elif (base_net_type == 'resnet50'):
             from tensorflow.keras.applications import ResNet50 as fn
+
         elif (base_net_type == 'vgg'):
             from tensorflow.keras.applications import VGG16 as fn
+
 
         img_input = Input(shape=input_shape)
         roi_input = Input(shape=(None, 4))
@@ -78,121 +80,60 @@ class FRCNN():
         # Assume we will always use pretrained weights for Feature Network for now
         base_net = fn(weights='imagenet', include_top=False, input_tensor=img_input)
 
-        if (base_trainable == False):
-            for layer in base_net.layers:
-                layer.trainable = False
-                layer._name = layer.name + "a" # prevent duplicate layer name
+        for layer in base_net.layers:
+            layer.trainable = base_trainable
+            layer._name = layer.name + "a" # prevent duplicate layer name
 
         # For VGG, the last max pooling layer in VGGNet is also removed
         if (base_net_type == 'vgg'):
             # base_net.layers.pop() # does not work - https://github.com/tensorflow/tensorflow/issues/22479
             feature_network = base_net.layers[-2].output
+            num_features = 512
         else:
             feature_network = base_net.outputs[0]
+            num_features = 1024
+
+        self.feature_network = feature_network
 
         # Define RPN, built upon the base layers
         rpn = _rpn(feature_network, num_anchors)
-
         classifier = _classifier(feature_network, roi_input, num_rois, nb_classes=num_classes, trainable=True, base_net_type=base_net_type)
         self.model_rpn = Model(img_input, rpn[:2])
         self.model_classifier = Model([img_input, roi_input], classifier)
 
-
         # this will be the  model that holds both the RPN and the classifier, used to load/save weights for the models
         self.model_all = Model([img_input, roi_input], rpn[:2] + classifier)
 
+        # Create models that will be used for predictions
+        roi_input = Input(shape=(num_rois, 4))
+        feature_map_input = Input(shape=(None, None, num_features))
+        p_classifier = _classifier(feature_map_input, roi_input, num_rois, nb_classes=num_classes, trainable=True, base_net_type=base_net_type)
+        self.predict_rpn = Model(img_input, rpn)
+        self.predict_classifier = Model([feature_map_input, roi_input], p_classifier)
+
+        # Because we will reuse weights from training and load into predict models, via names, we need layer names to be the same
+        classifierNames = [
+            'input_3', 'input_2',
+            'roi_pooling_conv',
+            'time_distributed',
+            'time_distributed_1',
+            'time_distributed_2',
+            'time_distributed_3',
+            'time_distributed_4',
+            'dense_class_10',
+            'dense_regress_1'
+        ]
+
+        i = 0
+        for layer in self.predict_classifier.layers:
+            layer._name = classifierNames[i]
+            i = i + 1
+            #print(layer._name)
+
+        for l in range(len(self.predict_rpn.layers)):
+            self.predict_rpn.layers[l]._name = self.model_rpn.layers[l]._name
+
         # return model_all
-
-    def inspect(self, generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,512], anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]):
-        """ Based on generator, prints details of image, ground-truth annotations, as well as positive anchors
-        Args:
-            generator: Generator that was created via frcnn.FRCNNGenerator
-            target_size: Target size of shorter side. This should be the same as what was passed into the generator
-            rpn_stride: RPN stride. This should be the same as what was passed into the generator
-            anchor_box_scales: Anchor box scales array. This should be the same as what was passed into the generator
-            anchor_box_ratios: Anchor box ratios array. This should be the same as what was passed into the generator
-
-        Returns:
-            None
-        """
-        from matplotlib import pyplot as plt
-
-        X, Y, image_data, debug_img, debug_num_pos = next(generator)
-        print('Original image: height=%d width=%d'%(image_data['height'], image_data['width']))
-        print('Resized image:  height=%d width=%d im_size=%d'%(X.shape[1], X.shape[2], target_size))
-        print('Feature map size: height=%d width=%d rpn_stride=%d'%(Y[0].shape[1], Y[0].shape[2], rpn_stride))
-        print(X.shape)
-        print(str(len(Y))+" includes 'y_rpn_cls' and 'y_rpn_regr'")
-        print('Shape of y_rpn_cls {}'.format(Y[0].shape))
-        print('Shape of y_rpn_regr {}'.format(Y[1].shape))
-        print(image_data)
-
-        print('Number of positive anchors for this image: %d' % (debug_num_pos))
-        if debug_num_pos==0:
-            gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['height']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['height'])
-            gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['width']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['width'])
-            gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
-
-            img = debug_img.copy()
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            color = (0, 255, 0)
-            cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
-            cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
-            cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
-
-            plt.grid()
-            plt.imshow(img)
-            plt.show()
-        else:
-            cls = Y[0][0]
-            pos_cls = np.where(cls==1)
-            print(pos_cls)
-            regr = Y[1][0]
-            pos_regr = np.where(regr==1)
-            print(pos_regr)
-            print('y_rpn_cls for possible pos anchor: {}'.format(cls[pos_cls[0][0],pos_cls[1][0],:]))
-            print('y_rpn_regr for positive anchor: {}'.format(regr[pos_regr[0][0],pos_regr[1][0],:]))
-
-            gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['width']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['width'])
-            gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['height']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['height'])
-            gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
-
-            img = debug_img.copy()
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            color = (0, 255, 0)
-            #   cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
-            cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
-            cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
-
-            # Add text
-            textLabel = 'gt bbox'
-            (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,0.5,1)
-            textOrg = (gt_x1, gt_y1+5)
-            cv2.rectangle(img, (textOrg[0] - 5, textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (0, 0, 0), 2)
-            cv2.rectangle(img, (textOrg[0] - 5,textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (255, 255, 255), -1)
-            cv2.putText(img, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1)
-
-            # Draw positive anchors according to the y_rpn_regr
-            for i in range(debug_num_pos):
-
-                color = (100+i*(155/4), 0, 100+i*(155/4))
-
-                idx = pos_regr[2][i*4]/4
-                anchor_size = anchor_box_scales[int(idx/3)]
-                anchor_ratio = anchor_box_ratios[2-int((idx+1)%3)]
-
-                center = (pos_regr[1][i*4]*rpn_stride, pos_regr[0][i*4]*rpn_stride)
-                print('Center position of positive anchor: ', center)
-                cv2.circle(img, center, 3, color, -1)
-                anc_w, anc_h = anchor_size*anchor_ratio[0], anchor_size*anchor_ratio[1]
-                cv2.rectangle(img, (center[0]-int(anc_w/2), center[1]-int(anc_h/2)), (center[0]+int(anc_w/2), center[1]+int(anc_h/2)), color, 2)
-        #         cv2.putText(img, 'pos anchor bbox '+str(i+1), (center[0]-int(anc_w/2), center[1]-int(anc_h/2)-5), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
-
-        print('Green bboxes is ground-truth bbox. Others are positive anchors')
-        plt.figure(figsize=(8,8))
-        plt.grid()
-        plt.imshow(img)
-        plt.show()
 
     def summary(self):
         return self.model_all.summary()
@@ -229,277 +170,11 @@ class FRCNN():
             loss=loss_classifier, metrics={'dense_class_{}'.format(self.num_classes): 'accuracy'})
         self.model_all.compile(optimizer='sgd', loss='mae')
 
-    def FRCNNGenerator(self, all_img_data,
-        mode='train',
-        shuffle=True,
-        horizontal_flip=False,
-        vertical_flip=False,
-        rotation_range=0,
-        img_channel_mean=[103.939, 116.779, 123.68],
-        img_scaling_factor=1,
-        std_scaling=4,
-        target_size=600,
-
-        rpn_stride=16,
-        anchor_box_scales=[128,256,512],
-        anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
-        rpn_min_overlap = 0.3,
-        rpn_max_overlap = 0.5,
-
-        preprocessing_function=None):
-        """ Yield the ground-truth anchors as Y (labels)
-        Args:
-            all_img_data: list(filepath, width, height, list(bboxes))
-            horizontal_flip: Boolean. Randomly flip inputs horizontally.
-            vertical_flip: Boolean. Randomly flip inputs vertically.
-            rotation_range: Int. Degree range for random rotations (only 0 or 90 currently)
-            target_size: shorter-side length. Used for image resizing based on the shorter length
-            mode: 'train' or 'test'; 'train' mode need augmentation
-            preprocessing_function: If None, will do zero-center by mean pixel, else will execute function.
-
-        Returns:
-            x_img: image data after resized and scaling (smallest size = 300px)
-            Y: [y_rpn_cls, y_rpn_regr]
-            img_data_aug: augmented image data (original image with augmentation)
-            debug_img: show image for debug
-            num_pos: show number of positive anchors for debug
-        """
-        config = {
-            'horizontal_flip': horizontal_flip,
-            'vertical_flip': vertical_flip,
-            'rotation_range': rotation_range
-        }
-
-        if shuffle:
-            np.random.seed(1)
-            np.random.shuffle(all_img_data)
-
-        while True:
-            for img_data in all_img_data:
-                try:
-                    # read in image, and optionally add augmentation
-                    if mode == 'train':
-                        img_data_aug, x_img = augment(img_data, config, augment=True)
-                    else:
-                        img_data_aug, x_img = augment(img_data, config, augment=False)
-
-                    (width, height) = (img_data_aug['width'], img_data_aug['height'])
-                    (rows, cols, _) = x_img.shape
-
-                    assert cols == width
-                    assert rows == height
-
-                    # get image dimensions for resizing
-                    (resized_width, resized_height) = get_new_img_size(width, height, target_size)
-
-                    # resize the image so that smaller side is length = 300px
-                    x_img = cv2.resize(x_img, (resized_width, resized_height), interpolation=cv2.INTER_CUBIC)
-                    debug_img = x_img.copy()
-                    try:
-                        # calculate the output map size based on the network architecture
-                        (output_width, output_height) = _get_img_output_length(resized_width, resized_height, base_net_type=self.base_net_type)
-
-                        # # quick-fix
-                        # output_width = 33
-                        # output_height = 18
-
-                        # calculate RPN
-                        y_rpn_cls, y_rpn_regr, num_pos = calc_rpn(
-                            img_data_aug, width, height, resized_width, resized_height, output_width, output_height,
-                            rpn_stride, anchor_box_scales,
-                            anchor_box_ratios, rpn_min_overlap, rpn_max_overlap)
-                    except Exception as e:
-                        print(e)
-                        continue
-
-                    # Zero-center by mean pixel, and preprocess image
-
-                    if (preprocessing_function == None):
-                        # Zero-center by mean pixel, and preprocess image
-                        x_img = x_img[:,:, (2, 1, 0)]  # BGR -> RGB
-                        x_img = x_img.astype(np.float32)
-                        x_img[:, :, 0] -= img_channel_mean[0]
-                        x_img[:, :, 1] -= img_channel_mean[1]
-                        x_img[:, :, 2] -= img_channel_mean[2]
-                        x_img /= img_scaling_factor
-
-                        x_img = np.transpose(x_img, (2, 0, 1))
-                        x_img = np.expand_dims(x_img, axis=0)
-                        x_img = np.transpose(x_img, (0, 2, 3, 1))
-                    else:
-                        # Custom preprocessing function
-                        x_img = preprocessing_function(x_img)
-
-                    y_rpn_regr[:, y_rpn_regr.shape[1]//2:, :, :] *= std_scaling
-                    y_rpn_cls = np.transpose(y_rpn_cls, (0, 2, 3, 1))
-
-                    # print("DEBUG - AAAAA")
-                    # print(y_rpn_cls.shape)
+        self.predict_rpn.compile(optimizer='sgd', loss='mse')
+        self.predict_classifier.compile(optimizer='sgd', loss='mse')
+        # self.predict_classifier_only.compile(optimizer='sgd', loss='mse')
 
 
-                    y_rpn_regr = np.transpose(y_rpn_regr, (0, 2, 3, 1))
-
-                    yield np.copy(x_img), [np.copy(y_rpn_cls), np.copy(y_rpn_regr)], img_data_aug, debug_img, num_pos
-
-                except Exception as e:
-                    print(e)
-                    continue
-
-    def fit(self,
-        x=None, y=None, batch_size=None,
-        epochs=1, verbose=1,
-        callbacks=None,
-        validation_split=0., validation_data=None,
-        shuffle=True,
-        class_weight=None, sample_weight=None,
-        initial_epoch=0, steps_per_epoch=None,
-        validation_steps=None, validation_freq=1,
-        max_queue_size=10, workers=1, use_multiprocessing=False,
-        **kwargs
-    ):
-        """Trains the model for a fixed number of epochs (iterations on a dataset).
-
-        Arguments:
-        x: Input data. It could be:
-          - A Numpy array (or array-like), or a list of arrays
-            (in case the model has multiple inputs).
-          - A TensorFlow tensor, or a list of tensors
-            (in case the model has multiple inputs).
-          - A dict mapping input names to the corresponding array/tensors,
-            if the model has named inputs.
-          - A `tf.data` dataset. Should return a tuple
-            of either `(inputs, targets)` or
-            `(inputs, targets, sample_weights)`.
-          - A generator or `keras.utils.Sequence` returning `(inputs, targets)`
-            or `(inputs, targets, sample weights)`.
-        y: Target data. Like the input data `x`,
-          it could be either Numpy array(s) or TensorFlow tensor(s).
-          It should be consistent with `x` (you cannot have Numpy inputs and
-          tensor targets, or inversely). If `x` is a dataset, generator,
-          or `keras.utils.Sequence` instance, `y` should
-          not be specified (since targets will be obtained from `x`).
-        batch_size: Integer or `None`.
-            Number of samples per gradient update.
-            If unspecified, `batch_size` will default to 32.
-            Do not specify the `batch_size` if your data is in the
-            form of symbolic tensors, datasets,
-            generators, or `keras.utils.Sequence` instances (since they generate
-            batches).
-        epochs: Integer. Number of epochs to train the model.
-            An epoch is an iteration over the entire `x` and `y`
-            data provided.
-            Note that in conjunction with `initial_epoch`,
-            `epochs` is to be understood as "final epoch".
-            The model is not trained for a number of iterations
-            given by `epochs`, but merely until the epoch
-            of index `epochs` is reached.
-        verbose: 0, 1, or 2. Verbosity mode.
-            0 = silent, 1 = progress bar, 2 = one line per epoch.
-            Note that the progress bar is not particularly useful when
-            logged to a file, so verbose=2 is recommended when not running
-            interactively (eg, in a production environment).
-        callbacks: List of `keras.callbacks.Callback` instances.
-            List of callbacks to apply during training.
-            See `tf.keras.callbacks`.
-        validation_split: Float between 0 and 1.
-            Fraction of the training data to be used as validation data.
-            The model will set apart this fraction of the training data,
-            will not train on it, and will evaluate
-            the loss and any model metrics
-            on this data at the end of each epoch.
-            The validation data is selected from the last samples
-            in the `x` and `y` data provided, before shuffling. This argument is
-            not supported when `x` is a dataset, generator or
-           `keras.utils.Sequence` instance.
-        validation_data: Data on which to evaluate
-            the loss and any model metrics at the end of each epoch.
-            The model will not be trained on this data.
-            `validation_data` will override `validation_split`.
-            `validation_data` could be:
-              - tuple `(x_val, y_val)` of Numpy arrays or tensors
-              - tuple `(x_val, y_val, val_sample_weights)` of Numpy arrays
-              - dataset
-            For the first two cases, `batch_size` must be provided.
-            For the last case, `validation_steps` must be provided.
-        shuffle: Boolean (whether to shuffle the training data
-            before each epoch) or str (for 'batch').
-            'batch' is a special option for dealing with the
-            limitations of HDF5 data; it shuffles in batch-sized chunks.
-            Has no effect when `steps_per_epoch` is not `None`.
-        class_weight: Optional dictionary mapping class indices (integers)
-            to a weight (float) value, used for weighting the loss function
-            (during training only).
-            This can be useful to tell the model to
-            "pay more attention" to samples from
-            an under-represented class.
-        sample_weight: Optional Numpy array of weights for
-            the training samples, used for weighting the loss function
-            (during training only). You can either pass a flat (1D)
-            Numpy array with the same length as the input samples
-            (1:1 mapping between weights and samples),
-            or in the case of temporal data,
-            you can pass a 2D array with shape
-            `(samples, sequence_length)`,
-            to apply a different weight to every timestep of every sample.
-            In this case you should make sure to specify
-            `sample_weight_mode="temporal"` in `compile()`. This argument is not
-            supported when `x` is a dataset, generator, or
-           `keras.utils.Sequence` instance, instead provide the sample_weights
-            as the third element of `x`.
-        initial_epoch: Integer.
-            Epoch at which to start training
-            (useful for resuming a previous training run).
-        steps_per_epoch: Integer or `None`.
-            Total number of steps (batches of samples)
-            before declaring one epoch finished and starting the
-            next epoch. When training with input tensors such as
-            TensorFlow data tensors, the default `None` is equal to
-            the number of samples in your dataset divided by
-            the batch size, or 1 if that cannot be determined. If x is a
-            `tf.data` dataset, and 'steps_per_epoch'
-            is None, the epoch will run until the input dataset is exhausted.
-            This argument is not supported with array inputs.
-        validation_steps: Only relevant if `validation_data` is provided and
-            is a `tf.data` dataset. Total number of steps (batches of
-            samples) to draw before stopping when performing validation
-            at the end of every epoch. If validation_data is a `tf.data` dataset
-            and 'validation_steps' is None, validation
-            will run until the `validation_data` dataset is exhausted.
-        validation_freq: Only relevant if validation data is provided. Integer
-            or `collections_abc.Container` instance (e.g. list, tuple, etc.).
-            If an integer, specifies how many training epochs to run before a
-            new validation run is performed, e.g. `validation_freq=2` runs
-            validation every 2 epochs. If a Container, specifies the epochs on
-            which to run validation, e.g. `validation_freq=[1, 2, 10]` runs
-            validation at the end of the 1st, 2nd, and 10th epochs.
-        max_queue_size: Integer. Used for generator or `keras.utils.Sequence`
-            input only. Maximum size for the generator queue.
-            If unspecified, `max_queue_size` will default to 10.
-        workers: Integer. Used for generator or `keras.utils.Sequence` input
-            only. Maximum number of processes to spin up
-            when using process-based threading. If unspecified, `workers`
-            will default to 1. If 0, will execute the generator on the main
-            thread.
-        use_multiprocessing: Boolean. Used for generator or
-            `keras.utils.Sequence` input only. If `True`, use process-based
-            threading. If unspecified, `use_multiprocessing` will default to
-            `False`. Note that because this implementation relies on
-            multiprocessing, you should not pass non-picklable arguments to
-            the generator as they can't be passed easily to children processes.
-        **kwargs: Used for backwards compatibility.
-    Returns:
-        A `History` object. Its `History.history` attribute is
-        a record of training loss values and metrics values
-        at successive epochs, as well as validation loss values
-        and validation metrics values (if applicable).
-    Raises:
-        RuntimeError: If the model was never compiled.
-        ValueError: In case of mismatch between the provided input data
-            and what the model expects.
-        """
-        #TODO
-
-        return None
 
     def fit_generator(self,
         generator,                  #
@@ -836,6 +511,316 @@ class FRCNN():
         print('-- Training complete, exiting.')
         return None
 
+    def load_config(self,
+        anchor_box_scales=[128,256,512],
+        anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
+        std_scaling= 4.0,
+        rpn_stride=16,                              # stride at the RPN (this depends on the network configuration)
+        num_rois=32,
+        target_size=600,
+        img_channel_mean=[103.939, 116.779, 123.68],
+        img_scaling_factor=1,
+        ):
+        """Loads configuration settings for FRCNN model.
+
+        These will be used for predictions
+
+        Arguments:
+            anchor_box_scales: Anchor box scales array
+            anchor_box_ratios: Anchor box ratios array
+            std_scaling: For scaling of standard deviation
+            rpn_stride: RPN stride. This should be the same as what was passed into the generator
+            num_rois: number of regions of interest to be used
+            target_size: shorter-side length. Used for image resizing based on the shorter length
+            img_channel_mean: image channel-wise (RGB) mean to subtract for standardisation
+            img_scaling_factor: scaling factor to divide by, for standardisation
+
+        Returns:
+            None
+
+        """
+        self.anchor_box_scales = anchor_box_scales
+        self.anchor_box_ratios = anchor_box_ratios
+        self.std_scaling = std_scaling
+        self.rpn_stride = rpn_stride
+        self.im_size = target_size
+        self.img_channel_mean = img_channel_mean
+        self.img_scaling_factor = 1
+
+        return None
+
+
+    def load_weights(self, filepath):
+        """Loads all layer weights, from an HDF5 file.
+
+        Weights are loaded with 'by_name' true, meaning that weights are loaded into
+        layers only if they share the same name. This assumes a single HDF5 file
+
+        If it is desired to load weights with 'by_name' is False, and load
+        weights based on the network's topology, please access the individual embedded
+        sub-models in this class. eg frcnn.model_rpn.load_weights(filepath, by_name=False)
+
+        Arguments:
+             filepath: String, path to the weights file to load. For weight files in
+                TensorFlow format, this is the file prefix (the same as was passed
+                to 'save_weights').
+        Returns:
+            None
+        """
+        if (not os.path.isfile(filepath)):
+            raise FileNotFoundError('File does not exist: %s ' % filepath)
+
+        self.model_rpn.load_weights(filepath, by_name=True)
+        self.model_classifier.load_weights(filepath, by_name=True)
+
+        self.predict_rpn.load_weights(filepath, by_name=True)
+        self.predict_classifier.load_weights(filepath, by_name=True)
+        # self.predict_classifier_only.load_weights(filepath, by_name=True)
+        return None
+
+    def predict(self,
+              x,                            #
+              verbose=1,                    #
+              class_mapping=None,
+              bbox_threshold=0.7
+              ):   #
+        """Generates output predictions for the input samples.
+        Computation is done in batches.
+        Arguments:
+            x: Input samples
+            verbose: Verbosity mode, 0 or 1.
+                If verbose is 1, we will also show the images
+            class_mapping: Class mapping based on training set
+            bbox_threshold: If box classification value is less than this, we will ignore that box
+        Returns:
+            Numpy array(s) of predictions.
+        """
+        from matplotlib import pyplot as plt
+        # from matplotlib import animation
+
+        if (class_mapping == None):
+            print("class_mapping should not be None")
+            raise ValueError
+
+        # Switch key and value for class_mapping 'Person': 0 --> 0: 'Person'
+        class_mapping = {v: k for k, v in class_mapping.items()}
+
+        # Assign color to each
+        class_to_color = {class_mapping[v]: np.random.randint(0, 255, 3) for v in class_mapping}
+
+        samples = x
+        predicts = []
+        i = 1
+
+        for data in samples:
+            if verbose: print('{}/{} - {}'.format(i,len(samples), data['filepath']))
+            i = i + 1
+            st = time.time()
+
+            # convert image
+            img_original = cv2.imread(data['filepath'])
+            img, ratio = _format_img(img_original, self.img_channel_mean, self.img_scaling_factor, self.im_size)
+            img = np.transpose(img, (0, 2, 3, 1))
+
+            # get output layer Y1, Y2 from the RPN and the feature maps F
+            # Y1: y_rpn_cls, Y2: y_rpn_regr
+            [Y1, Y2, F] = self.predict_rpn.predict(img) ##
+
+            # Get bboxes by applying NMS
+            # R.shape = (300, 4)
+            R = rpn_to_roi(Y1, Y2,
+                self.std_scaling, self.anchor_box_ratios, self.anchor_box_scales,self.rpn_stride,
+                use_regr=True, overlap_thresh=0.7)
+
+            # convert from (x1,y1,x2,y2) to (x,y,w,h)
+            R[:, 2] -= R[:, 0]
+            R[:, 3] -= R[:, 1]
+
+            # apply the spatial pyramid pooling to the proposed regions
+            bboxes = {}
+            probs = {}
+
+            for jk in range(R.shape[0]//self.num_rois + 1):
+                ROIs = np.expand_dims(R[self.num_rois*jk:self.num_rois*(jk+1), :], axis=0)
+                if ROIs.shape[1] == 0:
+                    break
+
+                if jk == R.shape[0]//self.num_rois:
+                    #pad R
+                    curr_shape = ROIs.shape
+                    target_shape = (curr_shape[0],self.num_rois,curr_shape[2])
+                    ROIs_padded = np.zeros(target_shape).astype(ROIs.dtype)
+                    ROIs_padded[:, :curr_shape[1], :] = ROIs
+                    ROIs_padded[0, curr_shape[1]:, :] = ROIs[0, 0, :]
+                    ROIs = ROIs_padded
+
+                [P_cls, P_regr] = self.predict_classifier.predict([F, ROIs]) ##
+
+                # Calculate bboxes coordinates on resized image
+                for ii in range(P_cls.shape[1]):
+
+                    # Ignore 'bg' class
+                    if np.max(P_cls[0, ii, :]) < bbox_threshold or np.argmax(P_cls[0, ii, :]) == (P_cls.shape[2] - 1):
+                        continue
+
+                    # Get class name
+                    cls_name = class_mapping[np.argmax(P_cls[0, ii, :])]
+
+                    if cls_name not in bboxes:
+                        bboxes[cls_name] = []
+                        probs[cls_name] = []
+
+                    (x, y, w, h) = ROIs[0, ii, :]
+
+                    cls_num = np.argmax(P_cls[0, ii, :])
+                    try:
+                        (tx, ty, tw, th) = P_regr[0, ii, 4*cls_num:4*(cls_num+1)]
+                        tx /= C.classifier_regr_std[0]
+                        ty /= C.classifier_regr_std[1]
+                        tw /= C.classifier_regr_std[2]
+                        th /= C.classifier_regr_std[3]
+                        x, y, w, h = apply_regr(x, y, w, h, tx, ty, tw, th)
+                    except:
+                        pass
+                    bboxes[cls_name].append([self.rpn_stride*x, self.rpn_stride*y, self.rpn_stride*(x+w), self.rpn_stride*(y+h)])
+                    probs[cls_name].append(np.max(P_cls[0, ii, :]))
+
+            all_dets = []
+            all_pos = []
+            for key in bboxes:
+                bbox = np.array(bboxes[key])
+
+                # Apply non-max-suppression on final bboxes to get the output bounding boxe
+                new_boxes, new_probs = non_max_suppression_fast(bbox, np.array(probs[key]), overlap_thresh=0.2)
+                for jk in range(new_boxes.shape[0]):
+                    (x1, y1, x2, y2) = new_boxes[jk, :]
+
+                    # Calculate real coordinates on original image
+                    (real_x1, real_y1, real_x2, real_y2) = _get_real_coordinates(ratio, x1, y1, x2, y2)
+                    all_pos.append((real_x1, real_y1, real_x2, real_y2))
+
+                    cv2.rectangle(img_original,(real_x1, real_y1), (real_x2, real_y2), (int(class_to_color[key][0]), int(class_to_color[key][1]), int(class_to_color[key][2])),4)
+
+                    textLabel = '{}: {}'.format(key,int(100*new_probs[jk]))
+                    all_dets.append((key,100*new_probs[jk]))
+
+                    # (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,1,1)
+                    textOrg = (real_x1, real_y1-0)
+
+                    y = real_y1+10 if real_y1 < 10 else real_y1
+                    textOrg = (real_x1, y)
+
+                    cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+                    cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+
+            if verbose:
+                print('Elapsed time = {}'.format(time.time() - st))
+                print(all_dets)
+
+                # plt.figure(figsize=(10,10))
+                plt.figure()
+                plt.grid()
+                plt.imshow(cv2.cvtColor(img_original,cv2.COLOR_BGR2RGB))
+                plt.show()
+
+            predicts.append((all_dets, all_pos))    # store all predictions and their positions for each image
+
+        predicts = np.asarray(predicts)
+        return predicts
+
+
+
+    def evaluate(self):
+        return []
+
+
+    # def predict_generator(self,
+    #                     generator,                  # Yes
+    #                     steps=None,                 #
+    #                     callbacks=None,             #
+    #                     max_queue_size=10,          #
+    #                     workers=1,                  #
+    #                     use_multiprocessing=False,  #
+    #                     verbose=0):                 # Yes
+    #     """Generates predictions for the input samples from a data generator.
+    #     The generator should return the same kind of data as accepted by
+    #     `predict_on_batch`.
+    #     Arguments:
+    #         generator: Generator yielding batches of input samples
+    #             or an instance of `keras.utils.Sequence` object in order to
+    #             avoid duplicate data when using multiprocessing.
+    #         steps: Total number of steps (batches of samples)
+    #             to yield from `generator` before stopping.
+    #             Optional for `Sequence`: if unspecified, will use
+    #             the `len(generator)` as a number of steps.
+    #         callbacks: List of `keras.callbacks.Callback` instances.
+    #             List of callbacks to apply during prediction.
+    #             See [callbacks](/api_docs/python/tf/keras/callbacks).
+    #         max_queue_size: Maximum size for the generator queue.
+    #         workers: Integer. Maximum number of processes to spin up
+    #             when using process-based threading.
+    #             If unspecified, `workers` will default to 1. If 0, will
+    #             execute the generator on the main thread.
+    #         use_multiprocessing: Boolean.
+    #             If `True`, use process-based threading.
+    #             If unspecified, `use_multiprocessing` will default to `False`.
+    #             Note that because this implementation relies on multiprocessing,
+    #             you should not pass non-picklable arguments to the generator
+    #             as they can't be passed easily to children processes.
+    #         verbose: verbosity mode, 0 or 1.
+    #     Returns:
+    #         Numpy array(s) of predictions.
+    #     Raises:
+    #         ValueError: In case the generator yields data in an invalid format.
+    #     """
+
+
+
+
+
+    #     return np.zeros(1)
+
+
+###############################################################################
+def _get_real_coordinates(ratio, x1, y1, x2, y2):
+
+    real_x1 = int(round(x1 // ratio))
+    real_y1 = int(round(y1 // ratio))
+    real_x2 = int(round(x2 // ratio))
+    real_y2 = int(round(y2 // ratio))
+
+    return (real_x1, real_y1, real_x2 ,real_y2)
+
+
+def _format_img(img, img_channel_mean, img_scaling_factor, im_size):
+
+    """ resize image based on config """
+    img_min_side = float(im_size)
+    (height,width,_) = img.shape
+
+    if width <= height:
+        ratio = img_min_side/width
+        new_height = int(ratio * height)
+        new_width = int(img_min_side)
+    else:
+        ratio = img_min_side/height
+        new_width = int(ratio * width)
+        new_height = int(img_min_side)
+    img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+
+    """ format image channels based on config """
+    img = img[:, :, (2, 1, 0)]
+    img = img.astype(np.float32)
+    img[:, :, 0] -= img_channel_mean[0]
+    img[:, :, 1] -= img_channel_mean[1]
+    img[:, :, 2] -= img_channel_mean[2]
+    img /= img_scaling_factor
+    img = np.transpose(img, (2, 0, 1))
+    img = np.expand_dims(img, axis=0)
+
+    return img, ratio
+
+
 def _get_img_output_length(width, height, base_net_type='resnet50'):
     b = base_net_type
     def get_output_length(input_length, b):
@@ -885,12 +870,12 @@ def _classifier(base_layers, input_rois, num_rois, nb_classes = 4, trainable=Tru
         out_roi_pool = RoiPoolingConv(pooling_regions, num_rois)([base_layers, input_rois])
 
         # flatten convolution layer and connect to 2 FC with dropout
-        print(out_roi_pool.shape)
+        # print(out_roi_pool.shape)
         out = TimeDistributed(Flatten(name='flatten'))(out_roi_pool)
         out = TimeDistributed(Dense(4096, activation='relu', name='fc1'))(out)
-        out = TimeDistributed(Dropout(0.5))(out)
+        out = TimeDistributed(Dropout(rate=0.5))(out)
         out = TimeDistributed(Dense(4096, activation='relu', name='fc2'))(out)
-        out = TimeDistributed(Dropout(0.5))(out)
+        out = TimeDistributed(Dropout(rate=0.5))(out)
 
     # There are two output layer
     # out_class: softmax acivation function for classification of the class name of the object
@@ -1445,11 +1430,15 @@ def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box
             if use_regr:
                 A[:, :, :, curr_layer] = apply_regr_np(A[:, :, :, curr_layer], regr)
 
+            # Avoid width and height exceeding 1
             A[2, :, :, curr_layer] = np.maximum(1, A[2, :, :, curr_layer])
             A[3, :, :, curr_layer] = np.maximum(1, A[3, :, :, curr_layer])
+
+            # Convert (x, y , w, h) to (x1, y1, x2, y2)
             A[2, :, :, curr_layer] += A[0, :, :, curr_layer]
             A[3, :, :, curr_layer] += A[1, :, :, curr_layer]
 
+            # Avoid bboxes drawn outside the feature map
             A[0, :, :, curr_layer] = np.maximum(0, A[0, :, :, curr_layer])
             A[1, :, :, curr_layer] = np.maximum(0, A[1, :, :, curr_layer])
             A[2, :, :, curr_layer] = np.minimum(cols-1, A[2, :, :, curr_layer])
@@ -1465,11 +1454,13 @@ def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box
     x2 = all_boxes[:, 2]
     y2 = all_boxes[:, 3]
 
+    # Find out the bboxes which is illegal and delete them from bboxes list
     idxs = np.where((x1 - x2 >= 0) | (y1 - y2 >= 0))
-
     all_boxes = np.delete(all_boxes, idxs, 0)
     all_probs = np.delete(all_probs, idxs, 0)
 
+	# Apply non_max_suppression
+	# Only extract the bboxes. Don't need rpn probs in the later process
     result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
 
     return result
@@ -1796,6 +1787,126 @@ class dotdict(dict):
 ###############################################################################
 # Public functions that will be revealed
 ###############################################################################
+def FRCNNGenerator(all_img_data,
+    mode='train',
+    shuffle=True,
+    horizontal_flip=False,
+    vertical_flip=False,
+    rotation_range=0,
+    img_channel_mean=[103.939, 116.779, 123.68],
+    img_scaling_factor=1,
+    std_scaling=4,
+    target_size=600,
+
+    rpn_stride=16,
+    anchor_box_scales=[128,256,512],
+    anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
+    rpn_min_overlap = 0.3,
+    rpn_max_overlap = 0.5,
+
+    base_net_type='resnet50',
+    preprocessing_function=None):
+    """ Yield the ground-truth anchors as Y (labels)
+    Args:
+        all_img_data: list(filepath, width, height, list(bboxes))
+        horizontal_flip: Boolean. Randomly flip inputs horizontally.
+        vertical_flip: Boolean. Randomly flip inputs vertically.
+        rotation_range: Int. Degree range for random rotations (only 0 or 90 currently)
+        target_size: shorter-side length. Used for image resizing based on the shorter length
+        mode: 'train' or 'test'; 'train' mode need augmentation
+        preprocessing_function: If None, will do zero-center by mean pixel, else will execute function.
+
+    Returns:
+        x_img: image data after resized and scaling (smallest size = 300px)
+        Y: [y_rpn_cls, y_rpn_regr]
+        img_data_aug: augmented image data (original image with augmentation)
+        debug_img: show image for debug
+        num_pos: show number of positive anchors for debug
+    """
+    config = {
+        'horizontal_flip': horizontal_flip,
+        'vertical_flip': vertical_flip,
+        'rotation_range': rotation_range
+    }
+
+    if shuffle:
+        np.random.seed(1)
+        np.random.shuffle(all_img_data)
+
+    while True:
+        for img_data in all_img_data:
+            try:
+                # read in image, and optionally add augmentation
+                if mode == 'train':
+                    img_data_aug, x_img = augment(img_data, config, augment=True)
+                else:
+                    img_data_aug, x_img = augment(img_data, config, augment=False)
+
+                (width, height) = (img_data_aug['width'], img_data_aug['height'])
+                (rows, cols, _) = x_img.shape
+
+                assert cols == width
+                assert rows == height
+
+                # get image dimensions for resizing
+                (resized_width, resized_height) = get_new_img_size(width, height, target_size)
+
+                # resize the image so that smaller side is length = 300px
+                x_img = cv2.resize(x_img, (resized_width, resized_height), interpolation=cv2.INTER_CUBIC)
+                debug_img = x_img.copy()
+                try:
+                    # calculate the output map size based on the network architecture
+                    (output_width, output_height) = _get_img_output_length(resized_width, resized_height, base_net_type=base_net_type)
+
+                    # # quick-fix
+                    # output_width = 33
+                    # output_height = 18
+
+                    # calculate RPN
+                    y_rpn_cls, y_rpn_regr, num_pos = calc_rpn(
+                        img_data_aug, width, height, resized_width, resized_height, output_width, output_height,
+                        rpn_stride, anchor_box_scales,
+                        anchor_box_ratios, rpn_min_overlap, rpn_max_overlap)
+                except Exception as e:
+                    print(e)
+                    continue
+
+                # Zero-center by mean pixel, and preprocess image
+
+                if (preprocessing_function == None):
+                    # Zero-center by mean pixel, and preprocess image
+                    x_img = x_img[:,:, (2, 1, 0)]  # BGR -> RGB
+                    x_img = x_img.astype(np.float32)
+                    x_img[:, :, 0] -= img_channel_mean[0]
+                    x_img[:, :, 1] -= img_channel_mean[1]
+                    x_img[:, :, 2] -= img_channel_mean[2]
+                    x_img /= img_scaling_factor
+
+                    x_img = np.transpose(x_img, (2, 0, 1))
+                    x_img = np.expand_dims(x_img, axis=0)
+                    x_img = np.transpose(x_img, (0, 2, 3, 1))
+                else:
+                    # Custom preprocessing function
+                    x_img = preprocessing_function(x_img)
+
+                y_rpn_regr[:, y_rpn_regr.shape[1]//2:, :, :] *= std_scaling
+                y_rpn_cls = np.transpose(y_rpn_cls, (0, 2, 3, 1))
+
+                # print("DEBUG - AAAAA")
+                # print(y_rpn_cls.shape)
+
+
+                y_rpn_regr = np.transpose(y_rpn_regr, (0, 2, 3, 1))
+
+                yield np.copy(x_img), [np.copy(y_rpn_cls), np.copy(y_rpn_regr)], img_data_aug, debug_img, num_pos
+
+            except Exception as e:
+                print(e)
+                continue
+
+
+
+
 # Parser for annotations
 def parseAnnotationFile(input_path, verbose=1, split=None):
     """Parse the data from annotation file (each line should contain filepath,x1,y1,x2,y2,class_name)
@@ -1816,7 +1927,7 @@ def parseAnnotationFile(input_path, verbose=1, split=None):
     all_imgs = {}
     classes_count = {}
     class_mapping = {}
-    visualise = True
+    # visualise = True
     i = 1
 
     st = time.time()
@@ -1843,26 +1954,28 @@ def parseAnnotationFile(input_path, verbose=1, split=None):
                     found_bg = True
                 class_mapping[class_name] = len(class_mapping)
 
-            if filename not in all_imgs:
-                filename = filename.replace('\\', '/')  # in case backslash is used, we will replace with forward slash instead
 
-                all_imgs[filename] = {}
+            filename = filename.replace('\\', '/')  # in case backslash is used, we will replace with forward slash instead
+            if (not os.path.isfile(filename)):
+                print("\n" + filename + " could not be read")
+            else:
 
-                if (not os.path.isfile(filename)): print(filename + " could not be read")
-                else:
+                if filename not in all_imgs:
                     img = cv2.imread(filename)
                     (rows,cols) = img.shape[:2]
-                    all_imgs[filename]['filepath'] = filename
-                    all_imgs[filename]['width'] = cols
-                    all_imgs[filename]['height'] = rows
-                    all_imgs[filename]['bboxes'] = []
-                # if np.random.randint(0,6) > 0:
-                #     all_imgs[filename]['imageset'] = 'trainval'
-                # else:
-                #     all_imgs[filename]['imageset'] = 'test'
 
-            all_imgs[filename]['bboxes'].append({'class': class_name, 'x1': int(x1), 'x2': int(x2), 'y1': int(y1), 'y2': int(y2)})
+                    all_imgs[filename] = {
+                        'filepath': filename,
+                        'width': cols,
+                        'height': rows,
+                        'bboxes': []
+                    }
+                    # if np.random.randint(0,6) > 0:
+                    #     all_imgs[filename]['imageset'] = 'trainval'
+                    # else:
+                    #     all_imgs[filename]['imageset'] = 'test'
 
+                all_imgs[filename]['bboxes'].append({'class': class_name, 'x1': int(x1), 'x2': int(x2), 'y1': int(y1), 'y2': int(y2)})
 
         all_data = []
         for key in all_imgs:
@@ -1887,8 +2000,101 @@ def parseAnnotationFile(input_path, verbose=1, split=None):
 
         return all_data, classes_count, class_mapping
 
+# Inspect generator
+def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,512], anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]):
+    """ Based on generator, prints details of image, ground-truth annotations, as well as positive anchors
+    Args:
+        generator: Generator that was created via frcnn.FRCNNGenerator
+        target_size: Target size of shorter side. This should be the same as what was passed into the generator
+        rpn_stride: RPN stride. This should be the same as what was passed into the generator
+        anchor_box_scales: Anchor box scales array. This should be the same as what was passed into the generator
+        anchor_box_ratios: Anchor box ratios array. This should be the same as what was passed into the generator
+
+    Returns:
+        None
+    """
+    from matplotlib import pyplot as plt
+
+    X, Y, image_data, debug_img, debug_num_pos = next(generator)
+    print('Original image: height=%d width=%d'%(image_data['height'], image_data['width']))
+    print('Resized image:  height=%d width=%d im_size=%d'%(X.shape[1], X.shape[2], target_size))
+    print('Feature map size: height=%d width=%d rpn_stride=%d'%(Y[0].shape[1], Y[0].shape[2], rpn_stride))
+    print(X.shape)
+    print(str(len(Y))+" includes 'y_rpn_cls' and 'y_rpn_regr'")
+    print('Shape of y_rpn_cls {}'.format(Y[0].shape))
+    print('Shape of y_rpn_regr {}'.format(Y[1].shape))
+    print(image_data)
+
+    print('Number of positive anchors for this image: %d' % (debug_num_pos))
+    if debug_num_pos==0:
+        gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['height']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['height'])
+        gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['width']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['width'])
+        gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
+
+        img = debug_img.copy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        color = (0, 255, 0)
+        cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
+        cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
+        cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
+
+        plt.grid()
+        plt.imshow(img)
+        plt.show()
+    else:
+        cls = Y[0][0]
+        pos_cls = np.where(cls==1)
+        print(pos_cls)
+        regr = Y[1][0]
+        pos_regr = np.where(regr==1)
+        print(pos_regr)
+        print('y_rpn_cls for possible pos anchor: {}'.format(cls[pos_cls[0][0],pos_cls[1][0],:]))
+        print('y_rpn_regr for positive anchor: {}'.format(regr[pos_regr[0][0],pos_regr[1][0],:]))
+
+        gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['width']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['width'])
+        gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['height']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['height'])
+        gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
+
+        img = debug_img.copy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        color = (0, 255, 0)
+        #   cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
+        cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
+        cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
+
+        # Add text
+        textLabel = 'gt bbox'
+        (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,0.5,1)
+        textOrg = (gt_x1, gt_y1+5)
+        cv2.rectangle(img, (textOrg[0] - 5, textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (0, 0, 0), 2)
+        cv2.rectangle(img, (textOrg[0] - 5,textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (255, 255, 255), -1)
+        cv2.putText(img, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1)
+
+        # Draw positive anchors according to the y_rpn_regr
+        for i in range(debug_num_pos):
+
+            color = (100+i*(155/4), 0, 100+i*(155/4))
+
+            idx = pos_regr[2][i*4]/4
+            anchor_size = anchor_box_scales[int(idx/3)]
+            anchor_ratio = anchor_box_ratios[2-int((idx+1)%3)]
+
+            center = (pos_regr[1][i*4]*rpn_stride, pos_regr[0][i*4]*rpn_stride)
+            print('Center position of positive anchor: ', center)
+            cv2.circle(img, center, 3, color, -1)
+            anc_w, anc_h = anchor_size*anchor_ratio[0], anchor_size*anchor_ratio[1]
+            cv2.rectangle(img, (center[0]-int(anc_w/2), center[1]-int(anc_h/2)), (center[0]+int(anc_w/2), center[1]+int(anc_h/2)), color, 2)
+    #         cv2.putText(img, 'pos anchor bbox '+str(i+1), (center[0]-int(anc_w/2), center[1]-int(anc_h/2)-5), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
+
+    print('Green bboxes is ground-truth bbox. Others are positive anchors')
+    plt.figure(figsize=(8,8))
+    plt.grid()
+    plt.imshow(img)
+    plt.show()
+
+
 # Viewer for annotated image
-def viewAnnotatedImage(annotation_file, query_image_path, class_mapping, verbose=1, palette=None):
+def viewAnnotatedImage(annotation_file, query_image_path, verbose=1):
     """Views the annotated image based on an annotation file and a query image path
 
     Args:
@@ -1897,9 +2103,6 @@ def viewAnnotatedImage(annotation_file, query_image_path, class_mapping, verbose
             This should correspond exactly with the annotation file's first column
         verbose: 0, 1, or 2. Verbosity mode.
             0 = silent, 1 = print out details of image and annotation file
-        palette: choose between 'base', 'tableau', 'css' or None
-            Colors for objects will be randomly picked from the palette if specified,
-            If None, a random RGB color will be assigned
     Returns:
         None
     """
@@ -1907,24 +2110,13 @@ def viewAnnotatedImage(annotation_file, query_image_path, class_mapping, verbose
     import matplotlib.colors as mcolors
 
     annotations = pd.read_csv(annotation_file, sep = ',', names = ['image_name','x1','y1','x2','y2','Object_type'])
-    num_classes = annotations['Object_type'].nunique()
+    class_mapping = annotations['Object_type'].unique()
+    class_mapping = { class_mapping[i] : i for i in range(0, len(class_mapping) ) }
+    num_classes = len(class_mapping) # annotations['Object_type'].nunique()
 
     colorset = np.random.uniform(0, 255, size=(num_classes, 3))
-    # if (palette != None):
-    #     colors = None
-    #     if (palette.lower() == 'tableau'):
-    #         colors = list(mcolors.TABLEAU_COLORS)
-    #     elif (palette.lower() == 'css'):
-    #         colors= list(mcolors.CSS4_COLORS)
-    #     elif (palette.lower() == 'base'):
-    #         colors = list(mcolors.BASE_COLORS)
-    #     else:
-    #         print('Invalid palette. Default random colors will be used')
-
-    #     if (colors != None):
-    #         colorset = np.random.choice(colors, num_classes, replace=(num_classes > len(colors)))
-
     img = plt.imread(query_image_path)
+    # img = img[:,:,:3]
     fig = plt.figure()
     ax = fig.add_axes([0,0,1,1])
     plt.imshow(img)
@@ -1952,10 +2144,57 @@ def viewAnnotatedImage(annotation_file, query_image_path, class_mapping, verbose
         cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, 255 - t[2], 2, cv2.LINE_AA)
         cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, t[2], 1, cv2.LINE_AA)
 
-
-
     plt.grid()
     plt.imshow(img)
     plt.show()
 
     return None
+
+def plotAccAndLoss(csv_path):
+    from matplotlib import pyplot as plt
+
+    record_df = pd.read_csv(csv_path)
+    r_epochs = len(record_df)
+
+    plt.figure(figsize=(15,5))
+    plt.subplot(4,2,1)
+    plt.plot(np.arange(0, r_epochs), record_df['mean_overlapping_bboxes'], 'r')
+    plt.title('mean_overlapping_bboxes')
+
+    plt.subplot(4,2,2)
+    plt.plot(np.arange(0, r_epochs), record_df['class_acc'], 'r')
+    plt.title('class_acc')
+
+    # plt.show()
+
+    # plt.figure(figsize=(15,5))
+
+    plt.subplot(4,2,3)
+    plt.plot(np.arange(0, r_epochs), record_df['loss_rpn_cls'], 'r')
+    plt.title('loss_rpn_cls')
+
+    plt.subplot(4,2,4)
+    plt.plot(np.arange(0, r_epochs), record_df['loss_rpn_regr'], 'r')
+    plt.title('loss_rpn_regr')
+    # plt.show()
+    # plt.figure(figsize=(15,5))
+    plt.subplot(4,2,5)
+    plt.plot(np.arange(0, r_epochs), record_df['loss_class_cls'], 'r')
+    plt.title('loss_class_cls')
+
+    plt.subplot(4,2,6)
+    plt.plot(np.arange(0, r_epochs), record_df['loss_class_regr'], 'r')
+    plt.title('loss_class_regr')
+    # plt.show()
+    # plt.figure(figsize=(15,5))
+    plt.subplot(4,2,7)
+    plt.plot(np.arange(0, r_epochs), record_df['curr_loss'], 'r')
+    plt.title('total_loss')
+
+    plt.subplot(4,2,8)
+    plt.plot(np.arange(0, r_epochs), record_df['elapsed_time'], 'r')
+    plt.title('elapsed_time')
+
+    plt.show()
+
+
