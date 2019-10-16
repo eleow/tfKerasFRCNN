@@ -103,7 +103,7 @@ annotation_train_path = './annotation_train.txt'
 train_data, classes_count, class_mapping = parseAnnotationFile(annotation_train_path)
 
 annotation_test_path = './annotation_test.txt'
-test_imgs, _ , _ = parseAnnotationFile(annotation_test_path)
+test_data, _ , _ = parseAnnotationFile(annotation_test_path)
 
 
 # Create model and load trained weights (Note: class mapping and num_classes should be based on training set)
@@ -113,9 +113,12 @@ frcnn_test.load_config(anchor_box_scales=anchor_box_scales, anchor_box_ratios=an
 frcnn_test.load_weights(model_path)
 frcnn_test.compile()
 
+# Load array of images
+from FRCNN import convertDataToImg
+test_imgs = convertDataToImg(test_data)
+
 # Perform predictions
 predicts = frcnn_test.predict(test_imgs, class_mapping=class_mapping, verbose=1)
-
 
 
 # evaluate = frcnn_test.evaluate()

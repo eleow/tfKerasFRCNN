@@ -135,12 +135,28 @@ class FRCNN():
 
         # return model_all
 
-    def summary(self):
-        return self.model_all.summary()
+    def summary(self, line_length=None, positions=None, print_fn=None):
+        """Prints a string summary of the overall FRCNN network
+
+        Arguments:
+            line_length: Total length of printed lines
+                (e.g. set this to adapt the display to different
+                terminal window sizes).
+            positions: Relative or absolute positions of log elements
+                in each line. If not provided,
+                defaults to `[.33, .55, .67, 1.]`.
+            print_fn: Print function to use. Defaults to `print`.
+                It will be called on each line of the summary.
+                You can set it to a custom function
+                in order to capture the string summary.
+        Raises:
+            ValueError: if `summary()` is called before the model is built.
+        """
+        return self.model_all.summary(line_length=line_length, positions=positions, print_fn=print_fn)
 
     def compile(self,
-            optimizer=None,
-            loss=None,
+            optimizer=[optimizers.Adam(lr=1e-5), optimizers.Adam(lr=1e-5), 'sgd'],
+            loss='mae',
             metrics=None,
             loss_weights=None,
             sample_weight_mode=None,
@@ -149,14 +165,81 @@ class FRCNN():
             distribute=None,
 
             **kwargs):
+        """Configures the model for training.
+
+        Arguments:
+            optimizer: Array of String (name of optimizer), array of optimizer instance,
+                String (name of optimizer) or optimizer instance
+                See `tf.keras.optimizers`. If it is not an array, the same optimizer will
+                be used for all submodels. Otherwise index 0-rpn, 1-classifier, 2-all.
+                Example: [optimizers.Adam(lr=1e-5), optimizers.Adam(lr=1e-5), 'sgd']
+
+            loss: String (name of objective function), objective function or
+                `tf.losses.Loss` instance. See `tf.losses`. If the model has
+                multiple outputs, you can use a different loss on each output by
+                passing a dictionary or a list of losses. The loss value that will
+                be minimized by the model will then be the sum of all individual
+                losses.
+            metrics: List of metrics to be evaluated by the model during training
+                and testing. Typically you will use `metrics=['accuracy']`.
+                To specify different metrics for different outputs of a
+                multi-output model, you could also pass a dictionary, such as
+                `metrics={'output_a': 'accuracy', 'output_b': ['accuracy', 'mse']}`.
+                You can also pass a list (len = len(outputs)) of lists of metrics
+                such as `metrics=[['accuracy'], ['accuracy', 'mse']]` or
+                `metrics=['accuracy', ['accuracy', 'mse']]`.
+            loss_weights: Optional list or dictionary specifying scalar
+                coefficients (Python floats) to weight the loss contributions
+                of different model outputs.
+                The loss value that will be minimized by the model
+                will then be the *weighted sum* of all individual losses,
+                weighted by the `loss_weights` coefficients.
+                If a list, it is expected to have a 1:1 mapping
+                to the model's outputs. If a tensor, it is expected to map
+                output names (strings) to scalar coefficients.
+            sample_weight_mode: If you need to do timestep-wise
+                sample weighting (2D weights), set this to `"temporal"`.
+                `None` defaults to sample-wise weights (1D).
+                If the model has multiple outputs, you can use a different
+                `sample_weight_mode` on each output by passing a
+                dictionary or a list of modes.
+            weighted_metrics: List of metrics to be evaluated and weighted
+                by sample_weight or class_weight during training and testing.
+            target_tensors: By default, Keras will create placeholders for the
+                model's target, which will be fed with the target data during
+                training. If instead you would like to use your own
+                target tensors (in turn, Keras will not expect external
+                Numpy data for these targets at training time), you
+                can specify them via the `target_tensors` argument. It can be
+                a single tensor (for a single-output model), a list of tensors,
+                or a dict mapping output names to target tensors.
+            distribute: NOT SUPPORTED IN TF 2.0, please create and compile the
+                model under distribution strategy scope instead of passing it to
+                compile.
+            **kwargs: Any additional arguments.
+        Raises:
+            ValueError: In case of invalid arguments for
+                `optimizer`, `loss`, `metrics` or `sample_weight_mode`.
+        """
 
         # Allow user to override defaults
         if optimizer != None:
-            optimizer_rpn = optimizer
-            optimizer_classifier = optimizer
+            if (isinstance(optimizer, list)):
+                if (len(optimizer) != 3):
+                    print("Length of list for optimizer should be 3")
+                    raise ValueError
+                else:
+                    optimizer_rpn = optimizer[0]
+                    optimizer_classifier = optimizer[1]
+                    optimizer_all = optimizer[2]
+            else:
+                optimizer_rpn = optimizer
+                optimizer_classifier = optimizer
+                optimizer_all = optimizer
         else:
             optimizer_rpn=optimizers.Adam(lr=1e-5)
             optimizer_classifier=optimizers.Adam(lr=1e-5)
+            optimizer_all = 'sgd'
 
         if loss != None:
             loss_rpn = loss
@@ -168,7 +251,8 @@ class FRCNN():
         self.model_rpn.compile(optimizer=optimizer_rpn, loss=loss_rpn)
         self.model_classifier.compile(optimizer=optimizer_classifier,
             loss=loss_classifier, metrics={'dense_class_{}'.format(self.num_classes): 'accuracy'})
-        self.model_all.compile(optimizer='sgd', loss='mae')
+
+        self.model_all.compile(optimizer=optimizer_all, loss='mae')
 
         self.predict_rpn.compile(optimizer='sgd', loss='mse')
         self.predict_classifier.compile(optimizer='sgd', loss='mse')
@@ -177,19 +261,16 @@ class FRCNN():
 
 
     def fit_generator(self,
-        generator,                  #
-        steps_per_epoch=None,       #
+        generator,                  # Yes
+        steps_per_epoch=1000,       #
         epochs=1,                   # Yes
         verbose=1,                  # Yes
-        callbacks=None,             #
-        validation_data=None,       #
-        validation_steps=None,      #
-        validation_freq=1,          #
-        class_weight=None,          #
-        max_queue_size=10,          #
-        workers=1,                  #
-        use_multiprocessing=False,  #
-        shuffle=True,               #
+        # callbacks=None,             #
+        # validation_data=None,       #
+        # validation_steps=None,      #
+        # validation_freq=1,          #
+        # class_weight=None,          #
+        # shuffle=True,               #
         initial_epoch=0,             # Yes
                                     #### customs
         class_mapping=None,
@@ -205,98 +286,26 @@ class FRCNN():
         model_path='./frcnn.hdf5',
         csv_path="./frcnn.csv",
         ):
-        """Fits the model on data yielded batch-by-batch by a Python generator.
-        The generator is run in parallel to the model, for efficiency.
-        For instance, this allows you to do real-time data augmentation
-        on images on CPU in parallel to training your model on GPU.
-        The use of `keras.utils.Sequence` guarantees the ordering
-        and guarantees the single use of every input per epoch when
-        using `use_multiprocessing=True`.
+        """Fits the model on data yielded batch-by-batch by frcnn.FRCNNGenerator
+
         Arguments:
-            generator: A generator or an instance of `Sequence`
-            (`keras.utils.Sequence`)
-                object in order to avoid duplicate data
-                when using multiprocessing.
-                The output of the generator must be either
-                - a tuple `(inputs, targets)`
-                - a tuple `(inputs, targets, sample_weights)`.
-                This tuple (a single output of the generator) makes a single batch.
-                Therefore, all arrays in this tuple must have the same length (equal
-                to the size of this batch). Different batches may have different
-                sizes.
-                For example, the last batch of the epoch is commonly smaller than
-                the
-                others, if the size of the dataset is not divisible by the batch
-                size.
+            generator: Generator that was created via frcnn.FRCNNGenerator
                 The generator is expected to loop over its data
                 indefinitely. An epoch finishes when `steps_per_epoch`
                 batches have been seen by the model.
             steps_per_epoch: Total number of steps (batches of samples)
                 to yield from `generator` before declaring one epoch
-                finished and starting the next epoch. It should typically
-                be equal to the number of samples of your dataset
-                divided by the batch size.
-                Optional for `Sequence`: if unspecified, will use
-                the `len(generator)` as a number of steps.
+                finished and starting the next epoch.
             epochs: Integer, total number of iterations on the data.
             verbose: Verbosity mode, 0, 1, or 2.
-            callbacks: List of callbacks to be called during training.
-            validation_data: This can be either
-                - a generator for the validation data
-                - a tuple (inputs, targets)
-                - a tuple (inputs, targets, sample_weights).
-            validation_steps: Only relevant if `validation_data`
-                is a generator. Total number of steps (batches of samples)
-                to yield from `generator` before stopping.
-                Optional for `Sequence`: if unspecified, will use
-                the `len(validation_data)` as a number of steps.
-            validation_freq: Only relevant if validation data is provided. Integer
-                or `collections_abc.Container` instance (e.g. list, tuple, etc.).
-                If an integer, specifies how many training epochs to run before a
-                new validation run is performed, e.g. `validation_freq=2` runs
-                validation every 2 epochs. If a Container, specifies the epochs on
-                which to run validation, e.g. `validation_freq=[1, 2, 10]` runs
-                validation at the end of the 1st, 2nd, and 10th epochs.
-            class_weight: Dictionary mapping class indices to a weight
-                for the class.
-            max_queue_size: Integer. Maximum size for the generator queue.
-                If unspecified, `max_queue_size` will default to 10.
-            workers: Integer. Maximum number of processes to spin up
-                when using process-based threading.
-                If unspecified, `workers` will default to 1. If 0, will
-                execute the generator on the main thread.
-            use_multiprocessing: Boolean.
-                If `True`, use process-based threading.
-                If unspecified, `use_multiprocessing` will default to `False`.
-                Note that because this implementation relies on multiprocessing,
-                you should not pass non-picklable arguments to the generator
-                as they can't be passed easily to children processes.
-            shuffle: Boolean. Whether to shuffle the order of the batches at
-                the beginning of each epoch. Only used with instances
-                of `Sequence` (`keras.utils.Sequence`).
-                Has no effect when `steps_per_epoch` is not `None`.
             initial_epoch: Epoch at which to start training
                 (useful for resuming a previous training run)
         Returns:
-            A `History` object.
-        Example:
-        ```python
-            def generate_arrays_from_file(path):
-                while 1:
-                    f = open(path)
-                    for line in f:
-                        # create numpy arrays of input data
-                        # and labels, from each line in the file
-                        x1, x2, y = process_line(line)
-                        yield ({'input_1': x1, 'input_2': x2}, {'output': y})
-                    f.close()
-            model.fit_generator(generate_arrays_from_file('/my_file.txt'),
-                                steps_per_epoch=10000, epochs=10)
-        ```
+            None
         Raises:
             ValueError: In case the generator yields data in an invalid format.
             """
-        epoch_length = 1000
+        epoch_length = steps_per_epoch
         iter_num = 0
 
         losses = np.zeros((epoch_length, 5))
@@ -612,13 +621,17 @@ class FRCNN():
         predicts = []
         i = 1
 
+        isImgData = True
+        if isinstance(samples[0], dict):
+            isImgData = False
+
         for data in samples:
-            if verbose: print('{}/{} - {}'.format(i,len(samples), data['filepath']))
+            if verbose and not isImgData: print('{}/{} - {}'.format(i,len(samples), data['filepath']))
             i = i + 1
             st = time.time()
 
             # convert image
-            img_original = cv2.imread(data['filepath'])
+            img_original = data if isImgData else cv2.imread(data['filepath'])
             img, ratio = _format_img(img_original, self.img_channel_mean, self.img_scaling_factor, self.im_size)
             img = np.transpose(img, (0, 2, 3, 1))
 
@@ -1913,7 +1926,7 @@ def parseAnnotationFile(input_path, verbose=1, split=None):
 
     Args:
         input_path: annotation file path
-        verbose: 0, 1, or 2. Verbosity mode.
+        verbose: 0 or 1. Verbosity mode.
             0 = silent, 1 = print out details of annotation file
 
     Returns:
@@ -2101,7 +2114,7 @@ def viewAnnotatedImage(annotation_file, query_image_path, verbose=1):
         annotation_file: annotation file path
         query_image_path: path of the image to check. eg 'resize/train/image100.jpg'.
             This should correspond exactly with the annotation file's first column
-        verbose: 0, 1, or 2. Verbosity mode.
+        verbose: 0 or 1. Verbosity mode.
             0 = silent, 1 = print out details of image and annotation file
     Returns:
         None
@@ -2197,4 +2210,29 @@ def plotAccAndLoss(csv_path):
 
     plt.show()
 
+def convertDataToImg(all_data, verbose=1):
+    """Converts all_data from parseAnnotationFile into a list of img
 
+    Args:
+        all_data: first output from parseAnnotationFile.
+            Format is list(filepath, width, height, list(bboxes))
+        verbose: 0 or 1. Verbosity mode.
+            0 = silent, 1 = print out details of conversion
+
+    Returns:
+        list of img array
+    """
+
+    if verbose:
+        print('Retrieving images from filepaths')
+        progbar = utils.Progbar(len(all_data))
+        def readImg(i, name, opt):
+            progbar.update(i)
+            return cv2.imread(name, opt)
+
+        test_imgs = [readImg(i, all_data[i]['filepath'], cv2.IMREAD_UNCHANGED) for i in range(len(all_data))]
+        print('')
+    else:
+        test_imgs = [cv2.imread(d['filepath'], cv2.IMREAD_UNCHANGED) for d in all_data]
+
+    return test_imgs
