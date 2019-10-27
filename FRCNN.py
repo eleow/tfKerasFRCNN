@@ -41,7 +41,9 @@ import copy
 import os
 import sys
 
-tf.logging.set_verbosity(tf.logging.ERROR)
+from matplotlib import pyplot as plt
+
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 DEBUG = False
 
 # class FRCNN(tf.keras.Model):
@@ -101,7 +103,7 @@ class FRCNN():
         self.model_rpn = Model(img_input, rpn[:2])
         self.model_classifier = Model([img_input, roi_input], classifier)
 
-        # this will be the  model that holds both the RPN and the classifier, used to load/save weights for the models
+        # this will be the model that holds both the RPN and the classifier, used to load/save weights for the models
         self.model_all = Model([img_input, roi_input], rpn[:2] + classifier)
 
         # Create models that will be used for predictions
@@ -110,28 +112,6 @@ class FRCNN():
         p_classifier = _classifier(feature_map_input, roi_input, num_rois, nb_classes=num_classes, trainable=True, base_net_type=base_net_type)
         self.predict_rpn = Model(img_input, rpn)
         self.predict_classifier = Model([feature_map_input, roi_input], p_classifier)
-
-        # Because we will reuse weights from training and load into predict models, via names, we need layer names to be the same
-        classifierNames = [
-            'input_3', 'input_2',
-            'roi_pooling_conv',
-            'time_distributed',
-            'time_distributed_1',
-            'time_distributed_2',
-            'time_distributed_3',
-            'time_distributed_4',
-            'dense_class_10',
-            'dense_regress_1'
-        ]
-
-        i = 0
-        for layer in self.predict_classifier.layers:
-            layer._name = classifierNames[i]
-            i = i + 1
-            #print(layer._name)
-
-        for l in range(len(self.predict_rpn.layers)):
-            self.predict_rpn.layers[l]._name = self.model_rpn.layers[l]._name
 
         # return model_all
 
@@ -155,15 +135,14 @@ class FRCNN():
         return self.model_all.summary(line_length=line_length, positions=positions, print_fn=print_fn)
 
     def compile(self,
-            optimizer=[optimizers.Adam(lr=1e-5), optimizers.Adam(lr=1e-5), 'sgd'],
-            loss='mae',
-            metrics=None,
-            loss_weights=None,
-            sample_weight_mode=None,
-            weighted_metrics=None,
-            target_tensors=None,
-            distribute=None,
-
+            optimizer=None,
+            loss=None,
+            # metrics=None,
+            # loss_weights=None,
+            # sample_weight_mode=None,
+            # weighted_metrics=None,
+            # target_tensors=None,
+            # distribute=None,
             **kwargs):
         """Configures the model for training.
 
@@ -173,49 +152,19 @@ class FRCNN():
                 See `tf.keras.optimizers`. If it is not an array, the same optimizer will
                 be used for all submodels. Otherwise index 0-rpn, 1-classifier, 2-all.
                 Example: [optimizers.Adam(lr=1e-5), optimizers.Adam(lr=1e-5), 'sgd']
+                Set to None to use defaults
 
-            loss: String (name of objective function), objective function or
-                `tf.losses.Loss` instance. See `tf.losses`. If the model has
-                multiple outputs, you can use a different loss on each output by
+            loss: Array of String(name of objective function), array of objective function,
+                String (name of objective function), objective function or
+                `tf.losses.Loss` instance. See `tf.losses`. If it is not an array,
+                the same loss will be used for all submodels. Otherwise, index
+                0-rpn, 1-classifier, 2-all.
+                If the model has multiple outputs, you can use a different loss on each output by
                 passing a dictionary or a list of losses. The loss value that will
                 be minimized by the model will then be the sum of all individual
                 losses.
-            metrics: List of metrics to be evaluated by the model during training
-                and testing. Typically you will use `metrics=['accuracy']`.
-                To specify different metrics for different outputs of a
-                multi-output model, you could also pass a dictionary, such as
-                `metrics={'output_a': 'accuracy', 'output_b': ['accuracy', 'mse']}`.
-                You can also pass a list (len = len(outputs)) of lists of metrics
-                such as `metrics=[['accuracy'], ['accuracy', 'mse']]` or
-                `metrics=['accuracy', ['accuracy', 'mse']]`.
-            loss_weights: Optional list or dictionary specifying scalar
-                coefficients (Python floats) to weight the loss contributions
-                of different model outputs.
-                The loss value that will be minimized by the model
-                will then be the *weighted sum* of all individual losses,
-                weighted by the `loss_weights` coefficients.
-                If a list, it is expected to have a 1:1 mapping
-                to the model's outputs. If a tensor, it is expected to map
-                output names (strings) to scalar coefficients.
-            sample_weight_mode: If you need to do timestep-wise
-                sample weighting (2D weights), set this to `"temporal"`.
-                `None` defaults to sample-wise weights (1D).
-                If the model has multiple outputs, you can use a different
-                `sample_weight_mode` on each output by passing a
-                dictionary or a list of modes.
-            weighted_metrics: List of metrics to be evaluated and weighted
-                by sample_weight or class_weight during training and testing.
-            target_tensors: By default, Keras will create placeholders for the
-                model's target, which will be fed with the target data during
-                training. If instead you would like to use your own
-                target tensors (in turn, Keras will not expect external
-                Numpy data for these targets at training time), you
-                can specify them via the `target_tensors` argument. It can be
-                a single tensor (for a single-output model), a list of tensors,
-                or a dict mapping output names to target tensors.
-            distribute: NOT SUPPORTED IN TF 2.0, please create and compile the
-                model under distribution strategy scope instead of passing it to
-                compile.
+                Set to None to use defaults
+
             **kwargs: Any additional arguments.
         Raises:
             ValueError: In case of invalid arguments for
@@ -224,6 +173,7 @@ class FRCNN():
 
         # Allow user to override defaults
         if optimizer != None:
+            # Ideally optimizer settings should be specified individually
             if (isinstance(optimizer, list)):
                 if (len(optimizer) != 3):
                     print("Length of list for optimizer should be 3")
@@ -232,46 +182,59 @@ class FRCNN():
                     optimizer_rpn = optimizer[0]
                     optimizer_classifier = optimizer[1]
                     optimizer_all = optimizer[2]
+            # Use same optimizer for all
             else:
                 optimizer_rpn = optimizer
                 optimizer_classifier = optimizer
                 optimizer_all = optimizer
+        # Use defaults for optimizers if not specified
         else:
             optimizer_rpn=optimizers.Adam(lr=1e-5)
             optimizer_classifier=optimizers.Adam(lr=1e-5)
             optimizer_all = 'sgd'
 
         if loss != None:
-            loss_rpn = loss
-            loss_classifier = loss
+            if (isinstance(loss, list)):
+                if (len(loss) != 3):
+                    print("Length of list for loss should be 3")
+                    raise ValueError
+                else:
+                    loss_rpn = loss[0]
+                    loss_classifier = loss[1]
+                    loss_all = loss[2]
+            # Use same loss function for all
+            else:
+                loss_rpn = loss
+                loss_classifier = loss
+        # Use defaults for loss if not specified
         else:
             loss_rpn = [rpn_loss_cls(self.num_anchors), rpn_loss_regr(self.num_anchors)]
             loss_classifier = [class_loss_cls, class_loss_regr(self.num_classes-1)]
+            loss_all = 'mae'
 
         self.model_rpn.compile(optimizer=optimizer_rpn, loss=loss_rpn)
         self.model_classifier.compile(optimizer=optimizer_classifier,
             loss=loss_classifier, metrics={'dense_class_{}'.format(self.num_classes): 'accuracy'})
 
-        self.model_all.compile(optimizer=optimizer_all, loss='mae')
+        self.model_all.compile(optimizer=optimizer_all, loss=loss_all)
 
         self.predict_rpn.compile(optimizer='sgd', loss='mse')
         self.predict_classifier.compile(optimizer='sgd', loss='mse')
-        # self.predict_classifier_only.compile(optimizer='sgd', loss='mse')
 
 
 
     def fit_generator(self,
-        generator,                  # Yes
-        steps_per_epoch=1000,       #
-        epochs=1,                   # Yes
-        verbose=1,                  # Yes
+        generator,
+        steps_per_epoch=1000,
+        epochs=1,
+        verbose=1,
         # callbacks=None,             #
         # validation_data=None,       #
         # validation_steps=None,      #
         # validation_freq=1,          #
         # class_weight=None,          #
         # shuffle=True,               #
-        initial_epoch=0,             # Yes
+        initial_epoch=0,
                                     #### customs
         class_mapping=None,
         target_size=-1,                # length of shorter size
@@ -279,14 +242,17 @@ class FRCNN():
         anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
         std_scaling= 4.0,                           # for scaling of standard deviation
         classifier_regr_std=[8.0, 8.0, 4.0, 4.0],   #
-        classifier_min_overlap = 0.1,
-        classifier_max_overlap = 0.5,
+        classifier_min_overlap = 0.3,
+        classifier_max_overlap = 0.7,
         rpn_stride=16,                              # stride at the RPN (this depends on the network configuration)
 
         model_path='./frcnn.hdf5',
         csv_path="./frcnn.csv",
         ):
-        """Fits the model on data yielded batch-by-batch by frcnn.FRCNNGenerator
+        """Fits the model on data yielded batch-by-batch by frcnn.FRCNNGenerator.
+        Will automatically save model and csv to the specified paths
+        model_path and csv_path respectively.
+        If file at model_path exists, will automatically resume training
 
         Arguments:
             generator: Generator that was created via frcnn.FRCNNGenerator
@@ -300,6 +266,8 @@ class FRCNN():
             verbose: Verbosity mode, 0, 1, or 2.
             initial_epoch: Epoch at which to start training
                 (useful for resuming a previous training run)
+            model_path: Path to save model hdf5 to. Also used to resume training from
+            csv_path: Path to save training csv to. Also used to resume training from
         Returns:
             None
         Raises:
@@ -531,7 +499,6 @@ class FRCNN():
         img_scaling_factor=1,
         ):
         """Loads configuration settings for FRCNN model.
-
         These will be used for predictions
 
         Arguments:
@@ -584,28 +551,138 @@ class FRCNN():
 
         self.predict_rpn.load_weights(filepath, by_name=True)
         self.predict_classifier.load_weights(filepath, by_name=True)
-        # self.predict_classifier_only.load_weights(filepath, by_name=True)
         return None
 
     def predict(self,
               x,                            #
               verbose=1,                    #
               class_mapping=None,
-              bbox_threshold=0.7
+              bbox_threshold=0.7,
+              overlap_thres=0.2
               ):   #
         """Generates output predictions for the input samples.
         Computation is done in batches.
         Arguments:
-            x: Input samples
+            x: Input samples. This should be a list of img data
             verbose: Verbosity mode, 0 or 1.
                 If verbose is 1, we will also show the images
             class_mapping: Class mapping based on training set
             bbox_threshold: If box classification value is less than this, we will ignore that box
+            overlap_thres: Non-maximum suppression setting. If overlap > overlap_thres, we will remove the box
         Returns:
             Numpy array(s) of predictions.
         """
-        from matplotlib import pyplot as plt
-        # from matplotlib import animation
+
+        return self._loopSamplesAndPredictOrEvaluate(x, class_mapping,
+            bbox_threshold, overlap_thresh=overlap_thres, verbose=1)
+
+
+    def evaluate(self,
+               x=None,
+               y=None,
+               batch_size=None,
+               verbose=1,
+               sample_weight=None,
+               steps=None,
+               callbacks=None,
+               max_queue_size=10,
+               workers=1,
+               use_multiprocessing=False,
+
+               class_mapping=None,
+               overlap_thresh=0.5
+            ):
+        """Returns the loss value & metrics values for the model in test mode.
+        Computation is done in batches.
+        Arguments:
+            x: Input samples. This should be a list of img data
+
+            y: Target data. Like the input data `x`,
+            it could be either Numpy array(s) or TensorFlow tensor(s).
+            It should be consistent with `x` (you cannot have Numpy inputs and
+            tensor targets, or inversely).
+            If `x` is a dataset, generator or
+            `keras.utils.Sequence` instance, `y` should not be specified (since
+            targets will be obtained from the iterator/dataset).
+            batch_size: Integer or `None`.
+                Number of samples per gradient update.
+                If unspecified, `batch_size` will default to 32.
+                Do not specify the `batch_size` is your data is in the
+                form of symbolic tensors, dataset,
+                generators, or `keras.utils.Sequence` instances (since they generate
+                batches).
+            verbose: 0 or 1. Verbosity mode.
+                0 = silent, 1 = progress bar.
+            sample_weight: Optional Numpy array of weights for
+                the test samples, used for weighting the loss function.
+                You can either pass a flat (1D)
+                Numpy array with the same length as the input samples
+                (1:1 mapping between weights and samples),
+                or in the case of temporal data,
+                you can pass a 2D array with shape
+                `(samples, sequence_length)`,
+                to apply a different weight to every timestep of every sample.
+                In this case you should make sure to specify
+                `sample_weight_mode="temporal"` in `compile()`. This argument is not
+                supported when `x` is a dataset, instead pass
+                sample weights as the third element of `x`.
+            steps: Integer or `None`.
+                Total number of steps (batches of samples)
+                before declaring the evaluation round finished.
+                Ignored with the default value of `None`.
+                If x is a `tf.data` dataset and `steps` is
+                None, 'evaluate' will run until the dataset is exhausted.
+                This argument is not supported with array inputs.
+            callbacks: List of `keras.callbacks.Callback` instances.
+                List of callbacks to apply during evaluation.
+                See [callbacks](/api_docs/python/tf/keras/callbacks).
+            max_queue_size: Integer. Used for generator or `keras.utils.Sequence`
+                input only. Maximum size for the generator queue.
+                If unspecified, `max_queue_size` will default to 10.
+            workers: Integer. Used for generator or `keras.utils.Sequence` input
+                only. Maximum number of processes to spin up when using
+                process-based threading. If unspecified, `workers` will default
+                to 1. If 0, will execute the generator on the main thread.
+            use_multiprocessing: Boolean. Used for generator or
+                `keras.utils.Sequence` input only. If `True`, use process-based
+                threading. If unspecified, `use_multiprocessing` will default to
+                `False`. Note that because this implementation relies on
+                multiprocessing, you should not pass non-picklable arguments to
+                the generator as they can't be passed easily to children processes.
+        Returns:
+            Scalar test loss (if the model has a single output and no metrics)
+            or list of scalars (if the model has multiple outputs
+            and/or metrics). The attribute `model.metrics_names` will give you
+            the display labels for the scalar outputs.
+        Raises:
+            ValueError: in case of invalid arguments.
+        """
+
+        return self._loopSamplesAndPredictOrEvaluate(x, class_mapping,
+            overlap_thresh=overlap_thresh, verbose=1, mode='evaluate')
+
+
+    def _loopSamplesAndPredictOrEvaluate(self, samples, class_mapping, bbox_threshold=None,
+        overlap_thresh=0.5, visualise=True, verbose=1, mode='predict'):
+
+        from sklearn.metrics import average_precision_score
+        # predicts = []
+        T = {}
+        P = {}
+        # mAPs = []
+        output = []
+
+        i = 1
+        isImgData = True
+
+
+        if isinstance(samples[0], dict):
+            isImgData = False
+
+        # For evaluation of mAP, we will need the ground-truth bboxes
+        if (mode=='evaluate' and isImgData):
+            print('For evaluate, please provide input as array of dict containing bboxes and filepath')
+            raise ValueError
 
         if (class_mapping == None):
             print("class_mapping should not be None")
@@ -617,13 +694,90 @@ class FRCNN():
         # Assign color to each
         class_to_color = {class_mapping[v]: np.random.randint(0, 255, 3) for v in class_mapping}
 
-        samples = x
-        predicts = []
-        i = 1
 
-        isImgData = True
-        if isinstance(samples[0], dict):
-            isImgData = False
+        def get_map(pred, gt, f):
+            T = {}
+            P = {}
+            fx, fy = f
+
+            for bbox in gt:
+                bbox['bbox_matched'] = False
+
+            pred_probs = np.array([s['prob'] for s in pred])
+            box_idx_sorted_by_prob = np.argsort(pred_probs)[::-1]
+
+            for box_idx in box_idx_sorted_by_prob:
+                pred_box = pred[box_idx]
+                pred_class = pred_box['class']
+                pred_x1 = pred_box['x1']
+                pred_x2 = pred_box['x2']
+                pred_y1 = pred_box['y1']
+                pred_y2 = pred_box['y2']
+                pred_prob = pred_box['prob']
+                if pred_class not in P:
+                    P[pred_class] = []
+                    T[pred_class] = []
+                P[pred_class].append(pred_prob)
+                found_match = False
+
+                for gt_box in gt:
+                    gt_class = gt_box['class']
+                    gt_x1 = gt_box['x1']/fx
+                    gt_x2 = gt_box['x2']/fx
+                    gt_y1 = gt_box['y1']/fy
+                    gt_y2 = gt_box['y2']/fy
+                    gt_seen = gt_box['bbox_matched']
+                    if gt_class != pred_class:
+                        continue
+                    if gt_seen:
+                        continue
+                    iou_map = iou((pred_x1, pred_y1, pred_x2, pred_y2), (gt_x1, gt_y1, gt_x2, gt_y2))
+                    if iou_map >= 0.5:
+                        found_match = True
+                        gt_box['bbox_matched'] = True
+                        break
+                    else:
+                        continue
+
+                T[pred_class].append(int(found_match))
+
+            for gt_box in gt:
+                if not gt_box['bbox_matched']:# and not gt_box['difficult']:
+                    if gt_box['class'] not in P:
+                        P[gt_box['class']] = []
+                        T[gt_box['class']] = []
+
+                    T[gt_box['class']].append(1)
+                    P[gt_box['class']].append(0)
+
+            return T, P
+
+
+
+        def calcPredictOutput():
+            # Calculate real coordinates on original image and save coordinates, and (key and prob) separately
+            (real_x1, real_y1, real_x2, real_y2) = _get_real_coordinates(ratio, x1, y1, x2, y2)
+            all_pos.append((real_x1, real_y1, real_x2, real_y2))
+            all_dets.append((key,100*new_probs[jk]))
+
+            if (visualise):
+                cv2.rectangle(img_original,(real_x1, real_y1), (real_x2, real_y2), (int(class_to_color[key][0]), int(class_to_color[key][1]), int(class_to_color[key][2])),4)
+                textLabel = '{}: {}'.format(key,int(100*new_probs[jk]))
+
+                # (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,1,1)
+                textOrg = (real_x1, real_y1-0)
+                y = real_y1+10 if real_y1 < 10 else real_y1
+                textOrg = (real_x1, y)
+                cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+                cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+
+        def calcEvalOutput():
+            # Save coordinates, class and probability
+            det = {'x1': x1, 'x2': x2, 'y1': y1, 'y2': y2, 'class': key, 'prob': new_probs[jk]}
+            all_dets.append(det)
+
+        calcOutput = calcPredictOutput if mode=='predict' else calcEvalOutput   # check once, instead of every loop
+
 
         for data in samples:
             if verbose and not isImgData: print('{}/{} - {}'.format(i,len(samples), data['filepath']))
@@ -632,7 +786,7 @@ class FRCNN():
 
             # convert image
             img_original = data if isImgData else cv2.imread(data['filepath'])
-            img, ratio = _format_img(img_original, self.img_channel_mean, self.img_scaling_factor, self.im_size)
+            img, ratio, fx, fy = _format_img(img_original, self.img_channel_mean, self.img_scaling_factor, self.im_size)
             img = np.transpose(img, (0, 2, 3, 1))
 
             # get output layer Y1, Y2 from the RPN and the feature maps F
@@ -673,7 +827,8 @@ class FRCNN():
                 for ii in range(P_cls.shape[1]):
 
                     # Ignore 'bg' class
-                    if np.max(P_cls[0, ii, :]) < bbox_threshold or np.argmax(P_cls[0, ii, :]) == (P_cls.shape[2] - 1):
+                    if ( (bbox_threshold != None and np.max(P_cls[0, ii, :]) < bbox_threshold)
+                        or np.argmax(P_cls[0, ii, :]) == (P_cls.shape[2] - 1)):
                         continue
 
                     # Get class name
@@ -703,95 +858,47 @@ class FRCNN():
             for key in bboxes:
                 bbox = np.array(bboxes[key])
 
-                # Apply non-max-suppression on final bboxes to get the output bounding boxe
-                new_boxes, new_probs = non_max_suppression_fast(bbox, np.array(probs[key]), overlap_thresh=0.2)
+                # Apply non-max-suppression on final bboxes to get the output bounding boxes
+                new_boxes, new_probs = non_max_suppression_fast(bbox, np.array(probs[key]), overlap_thresh=overlap_thresh)
                 for jk in range(new_boxes.shape[0]):
                     (x1, y1, x2, y2) = new_boxes[jk, :]
 
-                    # Calculate real coordinates on original image
-                    (real_x1, real_y1, real_x2, real_y2) = _get_real_coordinates(ratio, x1, y1, x2, y2)
-                    all_pos.append((real_x1, real_y1, real_x2, real_y2))
-
-                    cv2.rectangle(img_original,(real_x1, real_y1), (real_x2, real_y2), (int(class_to_color[key][0]), int(class_to_color[key][1]), int(class_to_color[key][2])),4)
-
-                    textLabel = '{}: {}'.format(key,int(100*new_probs[jk]))
-                    all_dets.append((key,100*new_probs[jk]))
-
-                    # (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,1,1)
-                    textOrg = (real_x1, real_y1-0)
-
-                    y = real_y1+10 if real_y1 < 10 else real_y1
-                    textOrg = (real_x1, y)
-
-                    cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255), 2, lineType=cv2.LINE_AA)
-                    cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+                    # Upate all_dets and all_poos
+                    calcOutput()
 
             if verbose:
                 print('Elapsed time = {}'.format(time.time() - st))
-                print(all_dets)
 
-                # plt.figure(figsize=(10,10))
-                plt.figure()
-                plt.grid()
-                plt.imshow(cv2.cvtColor(img_original,cv2.COLOR_BGR2RGB))
-                plt.show()
+            if mode == 'predict':
+                if verbose: print(all_dets)
+                if visualise:
+                    # plt.figure(figsize=(10,10))
+                    plt.figure()
+                    plt.grid()
+                    plt.imshow(cv2.cvtColor(img_original,cv2.COLOR_BGR2RGB))
+                    plt.show()
+                output.append((all_dets, all_pos))    # store all predictions and their positions for each image
+            else:
 
-            predicts.append((all_dets, all_pos))    # store all predictions and their positions for each image
+                t, p = get_map(all_dets, data['bboxes'], (fx, fy))
+                for key in t.keys():
+                    if key not in T:
+                        T[key] = []
+                        P[key] = []
+                    T[key].extend(t[key])
+                    P[key].extend(p[key])
+                all_aps = []
+                for key in T.keys():
+                    ap = average_precision_score(T[key], P[key])
+                    all_aps.append(ap)
+                    if verbose: print('{} AP: {}'.format(key, ap))
+                if verbose:
+                    print('mAP = {}'.format(np.mean(np.array(all_aps))))
+                    print()
+                output.append(np.mean(np.array(all_aps)))
 
-        predicts = np.asarray(predicts)
-        return predicts
-
-
-
-    def evaluate(self):
-        return []
-
-
-    # def predict_generator(self,
-    #                     generator,                  # Yes
-    #                     steps=None,                 #
-    #                     callbacks=None,             #
-    #                     max_queue_size=10,          #
-    #                     workers=1,                  #
-    #                     use_multiprocessing=False,  #
-    #                     verbose=0):                 # Yes
-    #     """Generates predictions for the input samples from a data generator.
-    #     The generator should return the same kind of data as accepted by
-    #     `predict_on_batch`.
-    #     Arguments:
-    #         generator: Generator yielding batches of input samples
-    #             or an instance of `keras.utils.Sequence` object in order to
-    #             avoid duplicate data when using multiprocessing.
-    #         steps: Total number of steps (batches of samples)
-    #             to yield from `generator` before stopping.
-    #             Optional for `Sequence`: if unspecified, will use
-    #             the `len(generator)` as a number of steps.
-    #         callbacks: List of `keras.callbacks.Callback` instances.
-    #             List of callbacks to apply during prediction.
-    #             See [callbacks](/api_docs/python/tf/keras/callbacks).
-    #         max_queue_size: Maximum size for the generator queue.
-    #         workers: Integer. Maximum number of processes to spin up
-    #             when using process-based threading.
-    #             If unspecified, `workers` will default to 1. If 0, will
-    #             execute the generator on the main thread.
-    #         use_multiprocessing: Boolean.
-    #             If `True`, use process-based threading.
-    #             If unspecified, `use_multiprocessing` will default to `False`.
-    #             Note that because this implementation relies on multiprocessing,
-    #             you should not pass non-picklable arguments to the generator
-    #             as they can't be passed easily to children processes.
-    #         verbose: verbosity mode, 0 or 1.
-    #     Returns:
-    #         Numpy array(s) of predictions.
-    #     Raises:
-    #         ValueError: In case the generator yields data in an invalid format.
-    #     """
-
-
-
-
-
-    #     return np.zeros(1)
+        output = np.asarray(output)
+        return output
 
 
 ###############################################################################
@@ -805,10 +912,23 @@ def _get_real_coordinates(ratio, x1, y1, x2, y2):
     return (real_x1, real_y1, real_x2 ,real_y2)
 
 
-def _format_img(img, img_channel_mean, img_scaling_factor, im_size):
+def _format_img(img, img_channel_mean, img_scaling_factor, target_size):
+    """ format image for prediction or mAP calculation. Resize original image to target_size
+    Arguments:
+        img: cv2 image
+        img_channel_mean: image channel-wise (RGB) mean to subtract for standardisation
+        img_scaling_factor: scaling factor to divide by, for standardisation
+        target_size: shorter-side length. Used for image resizing based on the shorter length
+
+    Returns:
+        img: Scaled and normalized image with expanding dimension
+        ratio: img_min_side / original min side eg img_min_side / width if width <= height
+        fx: ratio for width scaling (original width / new width)
+        fy: ratio for height scaling (original height/ new height)
+    """
 
     """ resize image based on config """
-    img_min_side = float(im_size)
+    img_min_side = float(target_size)
     (height,width,_) = img.shape
 
     if width <= height:
@@ -819,6 +939,9 @@ def _format_img(img, img_channel_mean, img_scaling_factor, im_size):
         ratio = img_min_side/height
         new_width = int(ratio * width)
         new_height = int(img_min_side)
+
+    fx = width/float(new_width)
+    fy = height/float(new_height)
     img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
 
     """ format image channels based on config """
@@ -831,7 +954,7 @@ def _format_img(img, img_channel_mean, img_scaling_factor, im_size):
     img = np.transpose(img, (2, 0, 1))
     img = np.expand_dims(img, axis=0)
 
-    return img, ratio
+    return img, ratio, fx, fy
 
 
 def _get_img_output_length(width, height, base_net_type='resnet50'):
@@ -867,7 +990,7 @@ def _classifier(base_layers, input_rois, num_rois, nb_classes = 4, trainable=Tru
     if (base_net_type == 'resnet50'):
         pooling_regions = 14
         input_shape = (num_rois, pooling_regions, pooling_regions, 1024)
-        out_roi_pool = RoiPoolingConv(pooling_regions, num_rois)([base_layers, input_rois])
+        out_roi_pool = RoiPoolingConv(pooling_regions, num_rois)([base_layers, input_rois], name='roi_pooling_conv')
 
         # out = _classifier_layers(out_roi_pool, input_shape=input_shape, trainable=True)
         trainable = True
@@ -880,15 +1003,15 @@ def _classifier(base_layers, input_rois, num_rois, nb_classes = 4, trainable=Tru
     else:
         pooling_regions = 7
         input_shape = (num_rois, pooling_regions, pooling_regions, 512)
-        out_roi_pool = RoiPoolingConv(pooling_regions, num_rois)([base_layers, input_rois])
+        out_roi_pool = RoiPoolingConv(pooling_regions, num_rois, name='roi_pooling_conv')([base_layers, input_rois])
 
         # flatten convolution layer and connect to 2 FC with dropout
         # print(out_roi_pool.shape)
-        out = TimeDistributed(Flatten(name='flatten'))(out_roi_pool)
-        out = TimeDistributed(Dense(4096, activation='relu', name='fc1'))(out)
-        out = TimeDistributed(Dropout(rate=0.5))(out)
-        out = TimeDistributed(Dense(4096, activation='relu', name='fc2'))(out)
-        out = TimeDistributed(Dropout(rate=0.5))(out)
+        out = TimeDistributed(Flatten(name='flatten'), name='time_distributed')(out_roi_pool)
+        out = TimeDistributed(Dense(4096, activation='relu', name='fc1'), name='time_distributed_1')(out)
+        out = TimeDistributed(Dropout(rate=0.5), name='time_distributed_2')(out)
+        out = TimeDistributed(Dense(4096, activation='relu', name='fc2'), name='time_distributed_3')(out)
+        out = TimeDistributed(Dropout(rate=0.5), name='time_distributed_4')(out)
 
     # There are two output layer
     # out_class: softmax acivation function for classification of the class name of the object
@@ -978,7 +1101,6 @@ class RoiPoolingConv(tf.keras.layers.Layer):
     '''
     def __init__(self, pool_size, num_rois, **kwargs):
 
-#         self.dim_ordering = K.image_dim_ordering()
         self.pool_size = pool_size
         self.num_rois = num_rois
 
@@ -1472,8 +1594,8 @@ def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box
     all_boxes = np.delete(all_boxes, idxs, 0)
     all_probs = np.delete(all_probs, idxs, 0)
 
-	# Apply non_max_suppression
-	# Only extract the bboxes. Don't need rpn probs in the later process
+   # Apply non_max_suppression
+   # Only extract the bboxes. Don't need rpn probs in the later process
     result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
 
     return result
@@ -1598,31 +1720,6 @@ def augment(img_data, config, augment=True):
     img_data_aug['height'] = img.shape[0]
     return img_data_aug, img
 
-
-# class SampleSelector:
-#     def __init__(self, class_count):
-#         # ignore classes that have zero samples
-#         self.classes = [b for b in class_count.keys() if class_count[b] > 0]
-#         self.class_cycle = itertools.cycle(self.classes)
-#         self.curr_class = next(self.class_cycle)
-
-#     def skip_sample_for_balanced_class(self, img_data):
-
-#         class_in_img = False
-
-#         for bbox in img_data['bboxes']:
-
-#             cls_name = bbox['class']
-
-#             if cls_name == self.curr_class:
-#                 class_in_img = True
-#                 self.curr_class = next(self.class_cycle)
-#                 break
-
-#         if class_in_img:
-#             return False
-#         else:
-#             return True
 
 def calc_rpn(img_data, width, height, resized_width, resized_height, output_width, output_height,
     rpn_stride, anchor_sizes, anchor_ratios, rpn_min_overlap, rpn_max_overlap
@@ -1788,6 +1885,8 @@ def calc_rpn(img_data, width, height, resized_width, resized_height, output_widt
 
     return np.copy(y_rpn_cls), np.copy(y_rpn_regr), num_pos
 
+
+
 ###############################################################################
 # Utilities
 class dotdict(dict):
@@ -1864,16 +1963,12 @@ def FRCNNGenerator(all_img_data,
                 # get image dimensions for resizing
                 (resized_width, resized_height) = get_new_img_size(width, height, target_size)
 
-                # resize the image so that smaller side is length = 300px
+                # resize the image so that smaller side has length = target_size
                 x_img = cv2.resize(x_img, (resized_width, resized_height), interpolation=cv2.INTER_CUBIC)
                 debug_img = x_img.copy()
                 try:
                     # calculate the output map size based on the network architecture
                     (output_width, output_height) = _get_img_output_length(resized_width, resized_height, base_net_type=base_net_type)
-
-                    # # quick-fix
-                    # output_width = 33
-                    # output_height = 18
 
                     # calculate RPN
                     y_rpn_cls, y_rpn_regr, num_pos = calc_rpn(
@@ -1904,11 +1999,6 @@ def FRCNNGenerator(all_img_data,
 
                 y_rpn_regr[:, y_rpn_regr.shape[1]//2:, :, :] *= std_scaling
                 y_rpn_cls = np.transpose(y_rpn_cls, (0, 2, 3, 1))
-
-                # print("DEBUG - AAAAA")
-                # print(y_rpn_cls.shape)
-
-
                 y_rpn_regr = np.transpose(y_rpn_regr, (0, 2, 3, 1))
 
                 yield np.copy(x_img), [np.copy(y_rpn_cls), np.copy(y_rpn_regr)], img_data_aug, debug_img, num_pos
@@ -1921,13 +2011,18 @@ def FRCNNGenerator(all_img_data,
 
 
 # Parser for annotations
-def parseAnnotationFile(input_path, verbose=1, split=None):
-    """Parse the data from annotation file (each line should contain filepath,x1,y1,x2,y2,class_name)
+def parseAnnotationFile(input_path, verbose=1, visualise=True, mode='simple', filteredList=None):
+    """Parse the data from annotation file in either 'simple' or 'voc' formats
 
     Args:
         input_path: annotation file path
         verbose: 0 or 1. Verbosity mode.
             0 = silent, 1 = print out details of annotation file
+        visualise: Boolean. If True, show distribution of classes in annotation file
+        mode: 'simple' or 'voc'. Default mode is 'simple' where each line
+            should contain filepath,x1,y1,x2,y2,class_name.
+            Can also accept 'voc' format which is the Pascal VOC data set format
+        filteredList: If specified, only extract classes in this list
 
     Returns:
         all_data: list(filepath, width, height, list(bboxes))
@@ -1936,25 +2031,53 @@ def parseAnnotationFile(input_path, verbose=1, split=None):
         class_mapping: dict{key:class_name, value: idx}
             e.g. {'Car': 0, 'Mobile phone': 1, 'Person': 2}
     """
+
+    st = time.time()
+    if (mode == 'simple'):
+        all_data, classes_count, class_mapping = parseAnnotationFileSimple(input_path, verbose, filteredList)
+    else:
+        all_data, classes_count, class_mapping = parseAnnotationFileVOC(input_path, verbose, filteredList)
+
+    sorted_classes = sorted(classes_count.items(), key = lambda kv:(kv[1], kv[0]), reverse=True)
+    if (verbose):
+        print()
+        print()
+        print('Classes in annotation file %s:' % (input_path))
+        # print({v: k for k, v in class_mapping.items()})
+        # print(list(class_mapping.keys()))
+        print(sorted_classes)
+        print('Total classes: ' + str(len(class_mapping)))
+        print('Spend %0.2f mins to load the data' % ((time.time()-st)/60) )
+
+    if (visualise):
+        plt.figure(figsize=(8,8))
+        plt.title('Distribution of classes for %s' % (input_path))
+        plt.bar([i[0] for i in sorted_classes], [i[1] for i in sorted_classes])
+        plt.show()
+        # plt.bar(list(classes_count.keys()), list(classes_count.values()) )
+
+    return all_data, classes_count, class_mapping
+
+
+def parseAnnotationFileSimple(input_path, verbose=1, filteredList=None):
     found_bg = False
     all_imgs = {}
     classes_count = {}
     class_mapping = {}
-    # visualise = True
     i = 1
 
-    st = time.time()
     with open(input_path,'r') as f:
 
         if verbose: print('Parsing annotation files')
-
         for line in f:
             sys.stdout.write('\r'+'idx=' + str(i))
             i += 1
 
-
             line_split = line.strip().split(',')
             (filename,x1,y1,x2,y2,class_name) = line_split
+
+            if (filteredList !=None and (not class_name in filteredList)):
+                continue    # If not one of our classes of interest, we ignore
 
             if class_name not in classes_count:
                 classes_count[class_name] = 1
@@ -2007,11 +2130,110 @@ def parseAnnotationFile(input_path, verbose=1, split=None):
             classes_count['bg'] = 0
             class_mapping['bg'] = len(class_mapping)
 
-        if (verbose):
-            print()
-            print('Spend %0.2f mins to load the data' % ((time.time()-st)/60) )
-
         return all_data, classes_count, class_mapping
+
+
+def parseAnnotationFileVOC(input_path, verbose=1, filteredList=None):
+    import xml.etree.ElementTree as ET
+
+    all_imgs = []
+    classes_count = {}
+    class_mapping = {}
+    data_paths = [os.path.join(input_path,s) for s in ['VOC2012']]
+    # data_paths = [os.path.join(input_path,s) for s in ['VOC2007', 'VOC2012']]
+
+    if verbose: print('Parsing annotation files')
+
+    for data_path in data_paths:
+        annot_path = os.path.join(data_path, 'Annotations')
+        imgs_path = os.path.join(data_path, 'JPEGImages')
+        imgsets_path_trainval = os.path.join(data_path, 'ImageSets','Main','trainval.txt')
+        imgsets_path_test = os.path.join(data_path, 'ImageSets','Main','test.txt')
+
+        trainval_files = []
+        test_files = []
+        try:
+            with open(imgsets_path_trainval) as f:
+                for line in f:
+                    trainval_files.append(line.strip() + '.jpg')
+        except Exception as e:
+            print(e)
+
+        try:
+            with open(imgsets_path_test) as f:
+                for line in f:
+                    test_files.append(line.strip() + '.jpg')
+        except Exception as e:
+            if data_path[-7:] == 'VOC2012':
+                # this is expected, most pascal voc distibutions dont have the test.txt file
+                pass
+            else:
+                print(e)
+
+        annots = [os.path.join(annot_path, s) for s in os.listdir(annot_path)]
+        idx = 0
+        for annot in annots:
+            try:
+                idx += 1
+                et = ET.parse(annot)
+                element = et.getroot()
+
+                element_objs = element.findall('object')
+                element_filename = element.find('filename').text
+                element_width = int(element.find('size').find('width').text)
+                element_height = int(element.find('size').find('height').text)
+
+                if len(element_objs) > 0:
+                    annotation_data = {'filepath': os.path.join(imgs_path, element_filename), 'width': element_width,
+                                       'height': element_height, 'bboxes': []}
+
+                    if element_filename in trainval_files:
+                        annotation_data['imageset'] = 'trainval'
+                    elif element_filename in test_files:
+                        annotation_data['imageset'] = 'test'
+                    else:
+                        annotation_data['imageset'] = 'trainval'
+
+                for element_obj in element_objs:
+                    class_name = element_obj.find('name').text
+
+                    if (filteredList !=None and (not class_name in filteredList)):
+                        continue    # If not one of our classes of interest, we ignore
+
+                    if class_name not in classes_count:
+                        classes_count[class_name] = 1
+                    else:
+                        classes_count[class_name] += 1
+
+                    if class_name not in class_mapping:
+                        class_mapping[class_name] = len(class_mapping)
+
+                    obj_bbox = element_obj.find('bndbox')
+                    x1 = int(round(float(obj_bbox.find('xmin').text)))
+                    y1 = int(round(float(obj_bbox.find('ymin').text)))
+                    x2 = int(round(float(obj_bbox.find('xmax').text)))
+                    y2 = int(round(float(obj_bbox.find('ymax').text)))
+                    difficulty = int(element_obj.find('difficult').text) == 1
+                    annotation_data['bboxes'].append(
+                        {'class': class_name, 'x1': x1, 'x2': x2, 'y1': y1, 'y2': y2, 'difficult': difficulty})
+                all_imgs.append(annotation_data)
+
+                # if visualise:
+                #     img = cv2.imread(annotation_data['filepath'])
+                #     for bbox in annotation_data['bboxes']:
+                #         cv2.rectangle(img, (bbox['x1'], bbox['y1']), (bbox[
+                #                       'x2'], bbox['y2']), (0, 0, 255))
+                #     cv2.imshow('img', img)
+                #     cv2.waitKey(0)
+            except Exception as e:
+                print(e)
+                continue
+
+        # always include special class 'bg'
+        classes_count['bg'] = 0
+        class_mapping['bg'] = len(class_mapping)
+
+    return all_imgs, classes_count, class_mapping
 
 # Inspect generator
 def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,512], anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]):
@@ -2129,7 +2351,12 @@ def viewAnnotatedImage(annotation_file, query_image_path, verbose=1):
 
     colorset = np.random.uniform(0, 255, size=(num_classes, 3))
     img = plt.imread(query_image_path)
-    # img = img[:,:,:3]
+
+    maxVal = 255
+    if (img.max() <= 1):
+        colorset /= 255
+        maxVal = 1
+
     fig = plt.figure()
     ax = fig.add_axes([0,0,1,1])
     plt.imshow(img)
@@ -2154,7 +2381,7 @@ def viewAnnotatedImage(annotation_file, query_image_path, verbose=1):
     # draw text last, so that they will not be obscured by the rectangles
     for t in textArr:
         # draw text twice, once in outline color with double thickness, and once in the text color. This enables text to always be seen
-        cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, 255 - t[2], 2, cv2.LINE_AA)
+        cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, maxVal - t[2], 2, cv2.LINE_AA)
         cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, t[2], 1, cv2.LINE_AA)
 
     plt.grid()
