@@ -151,10 +151,10 @@ class FRCNN():
                 String (name of optimizer) or optimizer instance
                 See `tf.keras.optimizers`. If it is not an array, the same optimizer will
                 be used for all submodels. Otherwise index 0-rpn, 1-classifier, 2-all.
-                Example: [optimizers.Adam(lr=1e-5), optimizers.Adam(lr=1e-5), 'sgd']
                 Set to None to use defaults
+                Example: [optimizers.Adam(lr=1e-5), optimizers.Adam(lr=1e-5), 'sgd']
 
-            loss: Array of String(name of objective function), array of objective function,
+            loss: Array of String (name of objective function), array of objective function,
                 String (name of objective function), objective function or
                 `tf.losses.Loss` instance. See `tf.losses`. If it is not an array,
                 the same loss will be used for all submodels. Otherwise, index
@@ -234,7 +234,7 @@ class FRCNN():
         # validation_freq=1,          #
         # class_weight=None,          #
         # shuffle=True,               #
-        initial_epoch=0,
+        initial_epoch=-1,
                                     #### customs
         class_mapping=None,
         target_size=-1,                # length of shorter size
@@ -242,20 +242,22 @@ class FRCNN():
         anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
         std_scaling= 4.0,                           # for scaling of standard deviation
         classifier_regr_std=[8.0, 8.0, 4.0, 4.0],   #
-        classifier_min_overlap = 0.3,
-        classifier_max_overlap = 0.7,
+        classifier_min_overlap = 0.1,               # repo values
+        classifier_max_overlap = 0.5,               # repo values
         rpn_stride=16,                              # stride at the RPN (this depends on the network configuration)
 
         model_path='./frcnn.hdf5',
         csv_path="./frcnn.csv",
         ):
-        """Fits the model on data yielded batch-by-batch by frcnn.FRCNNGenerator.
+        """Fits the model on data yielded batch-by-batch by FRCNNGenerator.
         Will automatically save model and csv to the specified paths
         model_path and csv_path respectively.
         If file at model_path exists, will automatically resume training
+        if initial_epoch is set to -1. Otherwise, will prompt user to resume
+        training
 
         Arguments:
-            generator: Generator that was created via frcnn.FRCNNGenerator
+            generator: Generator that was created via FRCNNGenerator
                 The generator is expected to loop over its data
                 indefinitely. An epoch finishes when `steps_per_epoch`
                 batches have been seen by the model.
@@ -263,11 +265,14 @@ class FRCNN():
                 to yield from `generator` before declaring one epoch
                 finished and starting the next epoch.
             epochs: Integer, total number of iterations on the data.
-            verbose: Verbosity mode, 0, 1, or 2.
-            initial_epoch: Epoch at which to start training
+            verbose: Verbosity mode. 0 = Silent, 1 = progress bar
+            initial_epoch: Integer. Epoch at which to start training
                 (useful for resuming a previous training run)
-            model_path: Path to save model hdf5 to. Also used to resume training from
-            csv_path: Path to save training csv to. Also used to resume training from
+            model_path: Path for saving model hdf5. Also used to resume training
+            csv_path: Path for saving training csv. Also used to resume training
+
+            class_mapping: Class mapping based on training set. This is the third output from parseAnnotationFile()
+            target_size: Integer. Shorter-side length. Used for image resizing based on the shorter length
         Returns:
             None
         Raises:
@@ -295,32 +300,43 @@ class FRCNN():
         if not os.path.isfile(model_path):
 
             print('Starting training')
+            initial_epoch = 0
 
             # Create the record.csv file to record losses, acc and mAP
             record_df = pd.DataFrame(columns=['mean_overlapping_bboxes', 'class_acc', 'loss_rpn_cls', 'loss_rpn_regr', 'loss_class_cls', 'loss_class_regr', 'curr_loss', 'elapsed_time', 'mAP'])
         else:
-            # If this is a continued training, load the trained model from before
-            print('Continuing training based on previous trained model')
-            print('Loading weights from {}'.format(model_path))
-            self.model_rpn.load_weights(model_path, by_name=True)
-            self.model_classifier.load_weights(model_path, by_name=True)
 
-            record_df = pd.read_csv(csv_path)
-            initial_epoch = len(record_df)
-            # for debugging
-            # r_mean_overlapping_bboxes = record_df['mean_overlapping_bboxes']
-            # r_class_acc = record_df['class_acc']
-            # r_loss_rpn_cls = record_df['loss_rpn_cls']
-            # r_loss_rpn_regr = record_df['loss_rpn_regr']
-            # r_loss_class_cls = record_df['loss_class_cls']
-            # r_loss_class_regr = record_df['loss_class_regr']
-            # r_elapsed_time = record_df['elapsed_time']
-            # r_mAP = record_df['mAP']
+            # if setting is not to continue training and file exists, confirm with user again, before overwriting file, just in case
+            if (initial_epoch != -1):
+                ask = input('File %s exists. Continue training? [Y/N]' % (model_path))
+                if (ask.lower() in ['y', 'yes', 'ya']):
+                    initial_epoch = -1
+                else:
+                    print('Restarting training and overwriting %s and %s' % (model_path, csv_path))
 
-            r_curr_loss = record_df['curr_loss']
-            best_loss = np.min(r_curr_loss)
+            if (initial_epoch == -1):
+                # If this is a continued training, load the trained model from before
+                print('Continuing training based on previous trained model')
+                print('Loading weights from {}'.format(model_path))
+                self.model_rpn.load_weights(model_path, by_name=True)
+                self.model_classifier.load_weights(model_path, by_name=True)
 
-            if verbose: print('Already trained %dK batches'% (len(record_df)))
+                record_df = pd.read_csv(csv_path)
+                initial_epoch = len(record_df)
+                # for debugging
+                # r_mean_overlapping_bboxes = record_df['mean_overlapping_bboxes']
+                # r_class_acc = record_df['class_acc']
+                # r_loss_rpn_cls = record_df['loss_rpn_cls']
+                # r_loss_rpn_regr = record_df['loss_rpn_regr']
+                # r_loss_class_cls = record_df['loss_class_cls']
+                # r_loss_class_regr = record_df['loss_class_regr']
+                # r_elapsed_time = record_df['elapsed_time']
+                # r_mAP = record_df['mAP']
+
+                r_curr_loss = record_df['curr_loss']
+                best_loss = np.min(r_curr_loss)
+
+                if verbose: print('Already trained %dK batches'% (len(record_df)))
 
         ####
         start_time = time.time()
@@ -497,6 +513,7 @@ class FRCNN():
         target_size=600,
         img_channel_mean=[103.939, 116.779, 123.68],
         img_scaling_factor=1,
+        classifier_regr_std=[8.0, 8.0, 4.0, 4.0],
         ):
         """Loads configuration settings for FRCNN model.
         These will be used for predictions
@@ -507,9 +524,10 @@ class FRCNN():
             std_scaling: For scaling of standard deviation
             rpn_stride: RPN stride. This should be the same as what was passed into the generator
             num_rois: number of regions of interest to be used
-            target_size: shorter-side length. Used for image resizing based on the shorter length
+            target_size: Integer. Shorter-side length. Used for image resizing based on the shorter length
             img_channel_mean: image channel-wise (RGB) mean to subtract for standardisation
             img_scaling_factor: scaling factor to divide by, for standardisation
+            classifier_regr_std: For scaling of standard deviation for classifier regression for x,y,w,h
 
         Returns:
             None
@@ -530,7 +548,8 @@ class FRCNN():
         """Loads all layer weights, from an HDF5 file.
 
         Weights are loaded with 'by_name' true, meaning that weights are loaded into
-        layers only if they share the same name. This assumes a single HDF5 file
+        layers only if they share the same name. This assumes a single HDF5 file and
+        consistent layer names
 
         If it is desired to load weights with 'by_name' is False, and load
         weights based on the network's topology, please access the individual embedded
@@ -555,7 +574,7 @@ class FRCNN():
 
     def predict(self,
               x,                            #
-              verbose=1,                    #
+              verbose=2,                    #
               class_mapping=None,
               bbox_threshold=0.7,
               overlap_thres=0.2
@@ -564,8 +583,10 @@ class FRCNN():
         Computation is done in batches.
         Arguments:
             x: Input samples. This should be a list of img data
-            verbose: Verbosity mode, 0 or 1.
-                If verbose is 1, we will also show the images
+                or a list of dict containing groundtruth bounding
+                boxes (key=bboxes) and path of the image (key=filepath)
+            verbose: Verbosity mode.
+                0 = silent. 1 = print results. 2 = print results and show images
             class_mapping: Class mapping based on training set
             bbox_threshold: If box classification value is less than this, we will ignore that box
             overlap_thres: Non-maximum suppression setting. If overlap > overlap_thres, we will remove the box
@@ -574,96 +595,49 @@ class FRCNN():
         """
 
         return self._loopSamplesAndPredictOrEvaluate(x, class_mapping,
-            bbox_threshold, overlap_thresh=overlap_thres, verbose=1)
+            bbox_threshold, overlap_thresh=overlap_thres, verbose=verbose)
 
 
     def evaluate(self,
                x=None,
-               y=None,
-               batch_size=None,
-               verbose=1,
-               sample_weight=None,
-               steps=None,
-               callbacks=None,
-               max_queue_size=10,
-               workers=1,
-               use_multiprocessing=False,
+            #    y=None,
+            #    batch_size=None,
+               verbose=2,
+            #    sample_weight=None,
+            #    steps=None,
+            #    callbacks=None,
+            #    max_queue_size=10,
+            #    workers=1,
+            #    use_multiprocessing=False,
 
                class_mapping=None,
                overlap_thresh=0.5
             ):
-        """Returns the loss value & metrics values for the model in test mode.
+        """Returns the mean average precision (mAP) for the model in test mode.
         Computation is done in batches.
-        Arguments:
-            x: Input samples. This should be a list of img data
 
-            y: Target data. Like the input data `x`,
-            it could be either Numpy array(s) or TensorFlow tensor(s).
-            It should be consistent with `x` (you cannot have Numpy inputs and
-            tensor targets, or inversely).
-            If `x` is a dataset, generator or
-            `keras.utils.Sequence` instance, `y` should not be specified (since
-            targets will be obtained from the iterator/dataset).
-            batch_size: Integer or `None`.
-                Number of samples per gradient update.
-                If unspecified, `batch_size` will default to 32.
-                Do not specify the `batch_size` is your data is in the
-                form of symbolic tensors, dataset,
-                generators, or `keras.utils.Sequence` instances (since they generate
-                batches).
-            verbose: 0 or 1. Verbosity mode.
-                0 = silent, 1 = progress bar.
-            sample_weight: Optional Numpy array of weights for
-                the test samples, used for weighting the loss function.
-                You can either pass a flat (1D)
-                Numpy array with the same length as the input samples
-                (1:1 mapping between weights and samples),
-                or in the case of temporal data,
-                you can pass a 2D array with shape
-                `(samples, sequence_length)`,
-                to apply a different weight to every timestep of every sample.
-                In this case you should make sure to specify
-                `sample_weight_mode="temporal"` in `compile()`. This argument is not
-                supported when `x` is a dataset, instead pass
-                sample weights as the third element of `x`.
-            steps: Integer or `None`.
-                Total number of steps (batches of samples)
-                before declaring the evaluation round finished.
-                Ignored with the default value of `None`.
-                If x is a `tf.data` dataset and `steps` is
-                None, 'evaluate' will run until the dataset is exhausted.
-                This argument is not supported with array inputs.
-            callbacks: List of `keras.callbacks.Callback` instances.
-                List of callbacks to apply during evaluation.
-                See [callbacks](/api_docs/python/tf/keras/callbacks).
-            max_queue_size: Integer. Used for generator or `keras.utils.Sequence`
-                input only. Maximum size for the generator queue.
-                If unspecified, `max_queue_size` will default to 10.
-            workers: Integer. Used for generator or `keras.utils.Sequence` input
-                only. Maximum number of processes to spin up when using
-                process-based threading. If unspecified, `workers` will default
-                to 1. If 0, will execute the generator on the main thread.
-            use_multiprocessing: Boolean. Used for generator or
-                `keras.utils.Sequence` input only. If `True`, use process-based
-                threading. If unspecified, `use_multiprocessing` will default to
-                `False`. Note that because this implementation relies on
-                multiprocessing, you should not pass non-picklable arguments to
-                the generator as they can't be passed easily to children processes.
+        Arguments:
+            x: Input samples. This should be a list of dict containing
+                groundtruth bounding boxes (key=bboxes) and path of the image (key=filepath)
+            verbose: Verbosity mode.
+                0 = silent. 1 = print results. 2 = print results and show images
+            class_mapping: Class mapping based on training set
+            overlap_thres: Non-maximum suppression setting. If overlap > overlap_thres, we will remove the box
+
         Returns:
-            Scalar test loss (if the model has a single output and no metrics)
-            or list of scalars (if the model has multiple outputs
-            and/or metrics). The attribute `model.metrics_names` will give you
-            the display labels for the scalar outputs.
+            List of mAPs
         Raises:
             ValueError: in case of invalid arguments.
         """
 
         return self._loopSamplesAndPredictOrEvaluate(x, class_mapping,
-            overlap_thresh=overlap_thresh, verbose=1, mode='evaluate')
+            overlap_thresh=overlap_thresh, verbose=verbose, mode='evaluate')
 
 
     def _loopSamplesAndPredictOrEvaluate(self, samples, class_mapping, bbox_threshold=None,
-        overlap_thresh=0.5, visualise=True, verbose=1, mode='predict'):
+        overlap_thresh=0.5, verbose=1, mode='predict'):
+
+        visualise = (verbose>1)
 
         from sklearn.metrics import average_precision_score
         # predicts = []
@@ -751,8 +725,6 @@ class FRCNN():
                     P[gt_box['class']].append(0)
 
             return T, P
-
-
 
         def calcPredictOutput():
             # Calculate real coordinates on original image and save coordinates, and (key and prob) separately
@@ -843,10 +815,10 @@ class FRCNN():
                     cls_num = np.argmax(P_cls[0, ii, :])
                     try:
                         (tx, ty, tw, th) = P_regr[0, ii, 4*cls_num:4*(cls_num+1)]
-                        tx /= C.classifier_regr_std[0]
-                        ty /= C.classifier_regr_std[1]
-                        tw /= C.classifier_regr_std[2]
-                        th /= C.classifier_regr_std[3]
+                        tx /= self.classifier_regr_std[0]
+                        ty /= self.classifier_regr_std[1]
+                        tw /= self.classifier_regr_std[2]
+                        th /= self.classifier_regr_std[3]
                         x, y, w, h = apply_regr(x, y, w, h, tx, ty, tw, th)
                     except:
                         pass
@@ -1899,14 +1871,33 @@ class dotdict(dict):
 ###############################################################################
 # Public functions that will be revealed
 ###############################################################################
-def FRCNNGenerator(all_img_data,
+def preprocess_input(x_img):
+    # Zero-center by mean pixel, and preprocess image
+    img_channel_mean=[103.939, 116.779, 123.68]
+    img_scaling_factor=1
+
+    x_img = x_img[:,:, (2, 1, 0)]  # BGR -> RGB
+    x_img = x_img.astype(np.float32)
+    x_img[:, :, 0] -= img_channel_mean[0]
+    x_img[:, :, 1] -= img_channel_mean[1]
+    x_img[:, :, 2] -= img_channel_mean[2]
+    x_img /= img_scaling_factor
+
+    x_img = np.transpose(x_img, (2, 0, 1))
+    x_img = np.expand_dims(x_img, axis=0)
+    x_img = np.transpose(x_img, (0, 2, 3, 1))
+    return x_img
+
+
+def FRCNNGenerator(
+    all_img_data,
     mode='train',
     shuffle=True,
     horizontal_flip=False,
     vertical_flip=False,
     rotation_range=0,
-    img_channel_mean=[103.939, 116.779, 123.68],
-    img_scaling_factor=1,
+    # img_channel_mean=[103.939, 116.779, 123.68],
+    # img_scaling_factor=1,
     std_scaling=4,
     target_size=600,
 
@@ -1914,18 +1905,33 @@ def FRCNNGenerator(all_img_data,
     anchor_box_scales=[128,256,512],
     anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
     rpn_min_overlap = 0.3,
-    rpn_max_overlap = 0.5,
+    rpn_max_overlap = 0.7,
 
     base_net_type='resnet50',
-    preprocessing_function=None):
-    """ Yield the ground-truth anchors as Y (labels)
+    preprocessing_function=preprocess_input
+    ):
+    """ Generates batch of image data with real-time data augmentation for FRCNN model
+    Yield the ground-truth anchors as Y (labels)
+
     Args:
         all_img_data: list(filepath, width, height, list(bboxes))
+        mode: 'train' or 'test'; 'train' mode need augmentation.
+        shuffle: Boolean. Whether to shuffle the data.
         horizontal_flip: Boolean. Randomly flip inputs horizontally.
         vertical_flip: Boolean. Randomly flip inputs vertically.
         rotation_range: Int. Degree range for random rotations (only 0 or 90 currently)
         target_size: shorter-side length. Used for image resizing based on the shorter length
-        mode: 'train' or 'test'; 'train' mode need augmentation
+        std_scaling: For scaling of standard deviation
+        target_size: Integer. Shorter-side length. Used for image resizing based on the shorter length.
+        rpn_stride: Stride at the RPN. This depends on the network configuration. For VGG16, rpn_stride = 16.
+        anchor_box_scales: Anchor box scales array.
+        anchor_box_ratios: Anchor box ratios array.
+        rpn_min_overlap: RPN minimum overlap. Anchor is labelled as “negative”
+            if anchor has IoU with all ground-truth boxes < rpn_min_overlap.
+        rpn_max_overlap: RPN maximum overlap. Anchor is labelled as “positive”
+            if anchor has an IoU > rpn_max_overlap with any ground-truth box.
+        base_net_type:
+
         preprocessing_function: If None, will do zero-center by mean pixel, else will execute function.
 
     Returns:
@@ -1979,22 +1985,8 @@ def FRCNNGenerator(all_img_data,
                     print(e)
                     continue
 
-                # Zero-center by mean pixel, and preprocess image
-
-                if (preprocessing_function == None):
-                    # Zero-center by mean pixel, and preprocess image
-                    x_img = x_img[:,:, (2, 1, 0)]  # BGR -> RGB
-                    x_img = x_img.astype(np.float32)
-                    x_img[:, :, 0] -= img_channel_mean[0]
-                    x_img[:, :, 1] -= img_channel_mean[1]
-                    x_img[:, :, 2] -= img_channel_mean[2]
-                    x_img /= img_scaling_factor
-
-                    x_img = np.transpose(x_img, (2, 0, 1))
-                    x_img = np.expand_dims(x_img, axis=0)
-                    x_img = np.transpose(x_img, (0, 2, 3, 1))
-                else:
-                    # Custom preprocessing function
+                # Preprocessing function
+                if (preprocessing_function != None):
                     x_img = preprocessing_function(x_img)
 
                 y_rpn_regr[:, y_rpn_regr.shape[1]//2:, :, :] *= std_scaling
@@ -2012,12 +2004,11 @@ def FRCNNGenerator(all_img_data,
 
 # Parser for annotations
 def parseAnnotationFile(input_path, verbose=1, visualise=True, mode='simple', filteredList=None):
-    """Parse the data from annotation file in either 'simple' or 'voc' formats
+    """Parse the data from an annotation file in 'simple' format, or from a directory in ‘Pascal VOC’ format
 
     Args:
-        input_path: annotation file path
-        verbose: 0 or 1. Verbosity mode.
-            0 = silent, 1 = print out details of annotation file
+        input_path: annotation file path or directory
+        verbose: Verbosity mode. 0 = silent. 1 = print out details of annotation file
         visualise: Boolean. If True, show distribution of classes in annotation file
         mode: 'simple' or 'voc'. Default mode is 'simple' where each line
             should contain filepath,x1,y1,x2,y2,class_name.
@@ -2039,6 +2030,7 @@ def parseAnnotationFile(input_path, verbose=1, visualise=True, mode='simple', fi
         all_data, classes_count, class_mapping = parseAnnotationFileVOC(input_path, verbose, filteredList)
 
     sorted_classes = sorted(classes_count.items(), key = lambda kv:(kv[1], kv[0]), reverse=True)
+    sorted_classes = list(filter(lambda c: c[1]>0, sorted_classes))
     if (verbose):
         print()
         print()
@@ -2175,6 +2167,7 @@ def parseAnnotationFileVOC(input_path, verbose=1, filteredList=None):
         for annot in annots:
             try:
                 idx += 1
+                sys.stdout.write('\r'+'idx=' + str(idx))
                 et = ET.parse(annot)
                 element = et.getroot()
 
@@ -2239,7 +2232,7 @@ def parseAnnotationFileVOC(input_path, verbose=1, filteredList=None):
 def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,512], anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]):
     """ Based on generator, prints details of image, ground-truth annotations, as well as positive anchors
     Args:
-        generator: Generator that was created via frcnn.FRCNNGenerator
+        generator: Generator that was created via FRCNNGenerator
         target_size: Target size of shorter side. This should be the same as what was passed into the generator
         rpn_stride: RPN stride. This should be the same as what was passed into the generator
         anchor_box_scales: Anchor box scales array. This should be the same as what was passed into the generator
@@ -2329,15 +2322,13 @@ def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,51
 
 
 # Viewer for annotated image
-def viewAnnotatedImage(annotation_file, query_image_path, verbose=1):
-    """Views the annotated image based on an annotation file and a query image path
+def viewAnnotatedImage(annotation_file, query_image_path):
+    """Views the annotated image based on an annotation file (in ‘simple’ format) and a query image path
 
     Args:
         annotation_file: annotation file path
-        query_image_path: path of the image to check. eg 'resize/train/image100.jpg'.
+        query_image_path: path of the image to check. eg 'data/train/image100.jpg'.
             This should correspond exactly with the annotation file's first column
-        verbose: 0 or 1. Verbosity mode.
-            0 = silent, 1 = print out details of image and annotation file
     Returns:
         None
     """
@@ -2381,7 +2372,15 @@ def viewAnnotatedImage(annotation_file, query_image_path, verbose=1):
     # draw text last, so that they will not be obscured by the rectangles
     for t in textArr:
         # draw text twice, once in outline color with double thickness, and once in the text color. This enables text to always be seen
-        cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, maxVal - t[2], 2, cv2.LINE_AA)
+        # cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, maxVal - t[2], 2, cv2.LINE_AA)
+
+        # Calculate perceived luminance: https://www.w3.org/TR/AERT/#color-contrast
+        # so that we can use a contrasting outline color.
+        r,g,b = t[2]
+        perceivedLum = (0.299*r + 0.587*g + 0.114*b)/255
+        outlineColor = (0,0,0) if perceivedLum > 0.5 else (255,255,255)
+
+        cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, outlineColor, 2, cv2.LINE_AA)
         cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, t[2], 1, cv2.LINE_AA)
 
     plt.grid()
@@ -2454,10 +2453,12 @@ def convertDataToImg(all_data, verbose=1):
         print('Retrieving images from filepaths')
         progbar = utils.Progbar(len(all_data))
         def readImg(i, name, opt):
+            # print(i)
             progbar.update(i)
             return cv2.imread(name, opt)
 
         test_imgs = [readImg(i, all_data[i]['filepath'], cv2.IMREAD_UNCHANGED) for i in range(len(all_data))]
+        progbar.update(len(all_data)) # update with last value after finishing list comprehension
         print('')
     else:
         test_imgs = [cv2.imread(d['filepath'], cv2.IMREAD_UNCHANGED) for d in all_data]
