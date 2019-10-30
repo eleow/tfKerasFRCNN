@@ -1,0 +1,51 @@
+
+------------------------
+Windows, linux with GPU:
+-------------------------
+
+Run the below line to add channel 'conda-forge' and make it the highest priority:
+......
+
+	conda config --prepend channels conda-forge
+
+Then run the below line to add the packages:
+.......
+
+	conda create -n rtav python=3.6 numpy=1.16.5 opencv=4.1.0 matplotlib tensorflow=1.13.1 tensorflow-gpu=1.13.1 cudatoolkit=9.0 cudnn=7.1.4 scipy=1.1.0 scikit-learn=0.21.3 pillow=5.1.0 spyder=3.3.2 cython=0.29.2 pathlib=1.0.1 ipython=7.2.0 imutils=0.5.2 yaml pandas keras keras-gpu pydot graphviz scikit-image imgaug librosa
+
+
+(Assume Cuda 9.0 is installed, and cudnn 7.1.4 installed, get cudnn from https://developer.nvidia.com/rdp/cudnn-archive)
+opencv=4.1.0 <--- has new machine learning features
+
+
+
+--------------------------
+Mac:
+
+--------------------------
+
+Run the below line to add channel 'conda-forge' and make it the highest priority:
+......
+
+	conda config --prepend channels conda-forge
+
+Then run the below line to add the packages:
+.......
+
+	conda create -n rtav python=3.6 numpy=1.16.5 opencv=4.1.0 matplotlib=2.2.3 scipy=1.1.0 pillow=5.1.0 tensorflow=1.13.1 scikit-learn=0.21.3 ipykernel=4.10.0 cython=0.29.2 pathlib=1.0.1 ipython=7.2.0 imutils=0.5.2 spyder yaml keras pandas pydot graphviz scikit-image imgaug librosa
+
+
+
+---------------------------
+Windows, linux without GPU:
+---------------------------
+
+Run the below line to add channel 'conda-forge' and make it the highest priority:
+......
+
+	conda config --prepend channels conda-forge
+
+Then run the below line to add the packages:
+.......
+
+	conda create -n rtav python=3.6 numpy=1.16.5 opencv=4.1.0 matplotlib tensorflow=1.13.1 scipy=1.1.0 scikit-learn=0.21.3 pillow=5.1.0 spyder=3.3.2 cython=0.29.2 pathlib=1.0.1 ipython=7.2.0 imutils=0.5.2 yaml pandas keras pydot graphviz scikit-image imgaug librosa
