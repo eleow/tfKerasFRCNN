@@ -2,7 +2,7 @@
 #
 # Faster-RCNN is composed of 3 neural networks
 #   Feature Network
-#   - usually a well-known pre-trained image classifier such as VGG or ResNet50,
+#   - usually a well-known pre-trained image classifier such as VGG or ResNet50
 #       minus a few layers
 #   - to generate good features from the images
 #   Region Proposal Network (RPN)
@@ -14,23 +14,23 @@
 #       final class and bounding box
 #
 #
-# based on the work by yhenon (https://github.com/yhenon/keras-frcnn/)
-# and RockyXu66 (https://github.com/RockyXu66/Faster_RCNN_for_Open_Images_Dataset_Keras),
+# based on the work by yhenon (https://github.com/yhenon/keras-frcnn/) and
+# RockyXu66 (https://github.com/RockyXu66/Faster_RCNN_for_Open_Images_Dataset_Keras),
 # - converted to use tensorflow.keras
 # - refactored to be used as a library, following tensorflow.keras Model API
 ###############################################################################
 
 import tensorflow as tf
-from tensorflow.keras import backend
-from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Add, Input, InputSpec, Dense, Activation, Dropout
-from tensorflow.keras.layers import Flatten, BatchNormalization, Conv2D
-from tensorflow.keras.layers import AveragePooling2D, MaxPooling2D, LeakyReLU, TimeDistributed
-from tensorflow.keras.initializers import he_normal
-
+from tensorflow.keras.layers import Flatten, Conv2D
+from tensorflow.keras.layers import AveragePooling2D, TimeDistributed
 from tensorflow.keras import optimizers
-
+from tensorflow.keras import initializers, regularizers
+from tensorflow.keras.backend import categorical_crossentropy
 import tensorflow.keras.utils as utils
+import tensorflow.keras.backend as K
+
 import numpy as np
 import pandas as pd
 import cv2
@@ -40,18 +40,24 @@ import math
 import copy
 import os
 import sys
-
+import imgaug.augmenters as iaa
+from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
+import imgaug as ia
 from matplotlib import pyplot as plt
 
+from numba import jit
+
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+# tf.config.optimizer.set_jit(True)
 DEBUG = False
 
-# class FRCNN(tf.keras.Model):
-class FRCNN():
-    def __init__(self,
+
+class FRCNN():  # class FRCNN(tf.keras.Model):
+    def __init__(
+        self,
         base_net_type='resnet50', base_trainable=False,
         num_classes=10, input_shape=(None, None, 3),
-        num_rois=32, num_anchors=9
+        num_rois=256, num_anchors=9
     ):
         # super(FRCNN, self).__init__(name='frcnn')
         self.num_classes = num_classes
@@ -59,12 +65,15 @@ class FRCNN():
         self.num_rois = num_rois
         self.base_net_type = base_net_type
 
-        # Checking of inputs for Feature Network (Base Net), allow some flexibility in name of base_net
+        # Checking of inputs for Feature Network (Base Net),
+        # allow some flexibility in name of base_net
         base_net_type = base_net_type.lower()
-        if ('resnet' in base_net_type): base_net_type = 'resnet50'
-        if ('vgg' in base_net_type): base_net_type = 'vgg'
+        if ('resnet' in base_net_type):
+            base_net_type = 'resnet50'
+        elif ('vgg' in base_net_type):
+            base_net_type = 'vgg'
 
-        if (base_net_type  != 'resnet50' and base_net_type != 'vgg'):
+        if (base_net_type != 'resnet50' and base_net_type != 'vgg'):
             print("Only resnet50 and vgg are currently supported as base models")
             raise ValueError
 
@@ -73,7 +82,6 @@ class FRCNN():
 
         elif (base_net_type == 'vgg'):
             from tensorflow.keras.applications import VGG16 as fn
-
 
         img_input = Input(shape=input_shape)
         roi_input = Input(shape=(None, 4))
@@ -84,7 +92,7 @@ class FRCNN():
 
         for layer in base_net.layers:
             layer.trainable = base_trainable
-            layer._name = layer.name + "a" # prevent duplicate layer name
+            layer._name = layer.name + "a"  # prevent duplicate layer name
 
         # For VGG, the last max pooling layer in VGGNet is also removed
         if (base_net_type == 'vgg'):
@@ -99,7 +107,9 @@ class FRCNN():
 
         # Define RPN, built upon the base layers
         rpn = _rpn(feature_network, num_anchors)
-        classifier = _classifier(feature_network, roi_input, num_rois, nb_classes=num_classes, trainable=True, base_net_type=base_net_type)
+        classifier = _classifier(
+            feature_network, roi_input, num_rois, nb_classes=num_classes,
+            trainable=True, base_net_type=base_net_type)
         self.model_rpn = Model(img_input, rpn[:2])
         self.model_classifier = Model([img_input, roi_input], classifier)
 
@@ -109,7 +119,9 @@ class FRCNN():
         # Create models that will be used for predictions
         roi_input = Input(shape=(num_rois, 4))
         feature_map_input = Input(shape=(None, None, num_features))
-        p_classifier = _classifier(feature_map_input, roi_input, num_rois, nb_classes=num_classes, trainable=True, base_net_type=base_net_type)
+        p_classifier = _classifier(
+            feature_map_input, roi_input, num_rois, nb_classes=num_classes,
+            trainable=True, base_net_type=base_net_type)
         self.predict_rpn = Model(img_input, rpn)
         self.predict_classifier = Model([feature_map_input, roi_input], p_classifier)
 
@@ -134,15 +146,10 @@ class FRCNN():
         """
         return self.model_all.summary(line_length=line_length, positions=positions, print_fn=print_fn)
 
-    def compile(self,
+    def compile(
+            self,
             optimizer=None,
             loss=None,
-            # metrics=None,
-            # loss_weights=None,
-            # sample_weight_mode=None,
-            # weighted_metrics=None,
-            # target_tensors=None,
-            # distribute=None,
             **kwargs):
         """Configures the model for training.
 
@@ -172,7 +179,7 @@ class FRCNN():
         """
 
         # Allow user to override defaults
-        if optimizer != None:
+        if optimizer is not None:
             # Ideally optimizer settings should be specified individually
             if (isinstance(optimizer, list)):
                 if (len(optimizer) != 3):
@@ -189,11 +196,11 @@ class FRCNN():
                 optimizer_all = optimizer
         # Use defaults for optimizers if not specified
         else:
-            optimizer_rpn=optimizers.Adam(lr=1e-5)
-            optimizer_classifier=optimizers.Adam(lr=1e-5)
+            optimizer_rpn = optimizers.Adam(lr=1e-5)
+            optimizer_classifier = optimizers.Adam(lr=1e-5)
             optimizer_all = 'sgd'
 
-        if loss != None:
+        if loss is not None:
             if (isinstance(loss, list)):
                 if (len(loss) != 3):
                     print("Length of list for loss should be 3")
@@ -209,11 +216,12 @@ class FRCNN():
         # Use defaults for loss if not specified
         else:
             loss_rpn = [rpn_loss_cls(self.num_anchors), rpn_loss_regr(self.num_anchors)]
-            loss_classifier = [class_loss_cls, class_loss_regr(self.num_classes-1)]
+            loss_classifier = [class_loss_cls, class_loss_regr(self.num_classes - 1)]
             loss_all = 'mae'
 
         self.model_rpn.compile(optimizer=optimizer_rpn, loss=loss_rpn)
-        self.model_classifier.compile(optimizer=optimizer_classifier,
+        self.model_classifier.compile(
+            optimizer=optimizer_classifier,
             loss=loss_classifier, metrics={'dense_class_{}'.format(self.num_classes): 'accuracy'})
 
         self.model_all.compile(optimizer=optimizer_all, loss=loss_all)
@@ -221,34 +229,27 @@ class FRCNN():
         self.predict_rpn.compile(optimizer='sgd', loss='mse')
         self.predict_classifier.compile(optimizer='sgd', loss='mse')
 
+    def fit_generator(
+            self,
+            generator,
+            steps_per_epoch=1000,
+            epochs=1,
+            verbose=1,
+            initial_epoch=-1,
 
+            class_mapping=None,
+            target_size=-1,                # length of shorter size
+            anchor_box_scales=[128, 256, 512],
+            anchor_box_ratios=[[1, 1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
+            std_scaling=4.0,                           # for scaling of standard deviation
+            classifier_regr_std=[8.0, 8.0, 4.0, 4.0],   #
+            classifier_min_overlap=0.1,               # repo values
+            classifier_max_overlap=0.5,               # repo values
+            rpn_stride=16,                              # stride at the RPN (this depends on the network configuration)
 
-    def fit_generator(self,
-        generator,
-        steps_per_epoch=1000,
-        epochs=1,
-        verbose=1,
-        # callbacks=None,             #
-        # validation_data=None,       #
-        # validation_steps=None,      #
-        # validation_freq=1,          #
-        # class_weight=None,          #
-        # shuffle=True,               #
-        initial_epoch=-1,
-                                    #### customs
-        class_mapping=None,
-        target_size=-1,                # length of shorter size
-        anchor_box_scales=[128,256,512],
-        anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
-        std_scaling= 4.0,                           # for scaling of standard deviation
-        classifier_regr_std=[8.0, 8.0, 4.0, 4.0],   #
-        classifier_min_overlap = 0.1,               # repo values
-        classifier_max_overlap = 0.5,               # repo values
-        rpn_stride=16,                              # stride at the RPN (this depends on the network configuration)
-
-        model_path='./frcnn.hdf5',
-        csv_path="./frcnn.csv",
-        ):
+            model_path='./frcnn.hdf5',
+            csv_path="./frcnn.csv"
+    ):
         """Fits the model on data yielded batch-by-batch by FRCNNGenerator.
         Will automatically save model and csv to the specified paths
         model_path and csv_path respectively.
@@ -288,7 +289,7 @@ class FRCNN():
         best_loss = np.Inf
 
         # input validation
-        if (class_mapping == None):
+        if (class_mapping is None):
             print("class_mapping should not be None")
             raise ValueError
         elif (target_size < 0):
@@ -303,10 +304,14 @@ class FRCNN():
             initial_epoch = 0
 
             # Create the record.csv file to record losses, acc and mAP
-            record_df = pd.DataFrame(columns=['mean_overlapping_bboxes', 'class_acc', 'loss_rpn_cls', 'loss_rpn_regr', 'loss_class_cls', 'loss_class_regr', 'curr_loss', 'elapsed_time', 'mAP'])
+            record_df = pd.DataFrame(
+                columns=[
+                    'mean_overlapping_bboxes', 'class_acc', 'loss_rpn_cls',
+                    'loss_rpn_regr', 'loss_class_cls', 'loss_class_regr', 'curr_loss', 'elapsed_time', 'mAP'])
         else:
 
-            # if setting is not to continue training and file exists, confirm with user again, before overwriting file, just in case
+            # if setting is not to continue training and file exists, confirm with user again,
+            # before overwriting file, just in case
             if (initial_epoch != -1):
                 ask = input('File %s exists. Continue training? [Y/N]' % (model_path))
                 if (ask.lower() in ['y', 'yes', 'ya']):
@@ -336,7 +341,8 @@ class FRCNN():
                 r_curr_loss = record_df['curr_loss']
                 best_loss = np.min(r_curr_loss)
 
-                if verbose: print('Already trained %dK batches'% (len(record_df)))
+                if verbose:
+                    print('Already trained %dK batches' % (len(record_df)))
 
         ####
         start_time = time.time()
@@ -351,13 +357,13 @@ class FRCNN():
                     if len(rpn_accuracy_rpn_monitor) == epoch_length and verbose:
                         mean_overlapping_bboxes = float(sum(rpn_accuracy_rpn_monitor))/len(rpn_accuracy_rpn_monitor)
                         rpn_accuracy_rpn_monitor = []
-        #                 print('Average number of overlapping bounding boxes from RPN = {} for {} previous iterations'.format(mean_overlapping_bboxes, epoch_length))
                         if mean_overlapping_bboxes == 0:
                             print('RPN is not producing bounding boxes that overlap the ground truth boxes. Check RPN settings or keep training.')
 
                     # Generate X (x_img) and label Y ([y_rpn_cls, y_rpn_regr])
                     X, Y, img_data, debug_img, debug_num_pos = next(generator)
-                    if DEBUG: print("DEBUG", img_data['filepath'])
+                    if DEBUG:
+                        print("DEBUG", img_data['filepath'])
 
                     # Train rpn model and get loss value [_, loss_rpn_cls, loss_rpn_regr]
                     loss_rpn = self.model_rpn.train_on_batch(X, Y)
@@ -367,7 +373,8 @@ class FRCNN():
 
                     # R: bboxes (shape=(300,4))
                     # Convert rpn layer to roi bboxes
-                    R = rpn_to_roi(P_rpn[0], P_rpn[1],
+                    R = rpn_to_roi(
+                        P_rpn[0], P_rpn[1],
                         std_scaling, anchor_box_ratios, anchor_box_scales, rpn_stride,
                         use_regr=True, overlap_thresh=0.7, max_boxes=300)
 
@@ -375,7 +382,10 @@ class FRCNN():
                     # X2: bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
                     # Y1: one hot code for bboxes from above => x_roi (X)
                     # Y2: corresponding labels and corresponding gt bboxes
-                    X2, Y1, Y2, IouS = calc_iou(R, img_data, [classifier_min_overlap, classifier_max_overlap], target_size, rpn_stride, class_mapping, classifier_regr_std)
+                    X2, Y1, Y2, IouS = calc_iou(
+                        R, img_data, [classifier_min_overlap, classifier_max_overlap],
+                        target_size, rpn_stride, class_mapping, classifier_regr_std)
+
                     if DEBUG:
                         print("DEBUG calc_iou (inputs)", classifier_min_overlap, classifier_max_overlap, target_size, rpn_stride, class_mapping, classifier_regr_std)
                         print("DEBUG calc_iou", X2, Y1, Y2, IouS)
@@ -416,7 +426,8 @@ class FRCNN():
                         except ValueError:
                             try:
                                 selected_neg_samples = np.random.choice(neg_samples, self.num_rois - len(selected_pos_samples), replace=True).tolist()
-                            except:
+                            except Exception as e:
+                                if DEBUG: print(e)
                                 # The neg_samples is [[1 0 ]] only, therefore there's no negative sample
                                 continue
 
@@ -448,8 +459,11 @@ class FRCNN():
 
                     iter_num += 1
 
-                    progbar.update(iter_num, [('rpn_cls', np.mean(losses[:iter_num, 0])), ('rpn_regr', np.mean(losses[:iter_num, 1])),
-                                            ('final_cls', np.mean(losses[:iter_num, 2])), ('final_regr', np.mean(losses[:iter_num, 3]))])
+                    progbar.update(
+                        iter_num, [
+                            ('rpn_cls', np.mean(losses[:iter_num, 0])), ('rpn_regr', np.mean(losses[:iter_num, 1])),
+                            ('final_cls', np.mean(losses[:iter_num, 2])), ('final_regr', np.mean(losses[:iter_num, 3]))
+                        ])
 
                     if iter_num == epoch_length:
                         loss_rpn_cls = np.mean(losses[:, 0])
@@ -478,19 +492,20 @@ class FRCNN():
 
                         if curr_loss < best_loss:
                             if verbose:
-                                print('Total loss decreased from {} to {}, saving weights'.format(best_loss,curr_loss))
+                                print('Total loss decreased from {} to {}, saving weights'.format(best_loss, curr_loss))
                             best_loss = curr_loss
                             self.model_all.save_weights(model_path)
 
-                        new_row = {'mean_overlapping_bboxes':round(mean_overlapping_bboxes, 3),
-                                'class_acc':round(class_acc, 3),
-                                'loss_rpn_cls':round(loss_rpn_cls, 3),
-                                'loss_rpn_regr':round(loss_rpn_regr, 3),
-                                'loss_class_cls':round(loss_class_cls, 3),
-                                'loss_class_regr':round(loss_class_regr, 3),
-                                'curr_loss':round(curr_loss, 3),
-                                'elapsed_time':round(elapsed_time, 3),
-                                'mAP': 0}
+                        new_row = {
+                            'mean_overlapping_bboxes': round(mean_overlapping_bboxes, 3),
+                            'class_acc': round(class_acc, 3),
+                            'loss_rpn_cls': round(loss_rpn_cls, 3),
+                            'loss_rpn_regr': round(loss_rpn_regr, 3),
+                            'loss_class_cls': round(loss_class_cls, 3),
+                            'loss_class_regr': round(loss_class_regr, 3),
+                            'curr_loss': round(curr_loss, 3),
+                            'elapsed_time': round(elapsed_time, 3),
+                            'mAP': 0}
 
                         record_df = record_df.append(new_row, ignore_index=True)
                         record_df.to_csv(csv_path, index=0)
@@ -504,17 +519,18 @@ class FRCNN():
         print('-- Training complete, exiting.')
         return None
 
-    def load_config(self,
-        anchor_box_scales=[128,256,512],
-        anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
-        std_scaling= 4.0,
+    def load_config(
+        self,
+        anchor_box_scales=[128, 256, 512],
+        anchor_box_ratios=[[1, 1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
+        std_scaling=4.0,
         rpn_stride=16,                              # stride at the RPN (this depends on the network configuration)
         num_rois=32,
         target_size=600,
         img_channel_mean=[103.939, 116.779, 123.68],
         img_scaling_factor=1,
         classifier_regr_std=[8.0, 8.0, 4.0, 4.0],
-        ):
+    ):
         """Loads configuration settings for FRCNN model.
         These will be used for predictions
 
@@ -542,7 +558,6 @@ class FRCNN():
         self.img_scaling_factor = 1
 
         return None
-
 
     def load_weights(self, filepath):
         """Loads all layer weights, from an HDF5 file.
@@ -572,13 +587,14 @@ class FRCNN():
         self.predict_classifier.load_weights(filepath, by_name=True)
         return None
 
-    def predict(self,
-              x,                            #
-              verbose=2,                    #
-              class_mapping=None,
-              bbox_threshold=0.7,
-              overlap_thres=0.2
-              ):   #
+    def predict(
+        self,
+        x,                            #
+        verbose=2,                    #
+        class_mapping=None,
+        bbox_threshold=0.7,
+        overlap_thres=0.2
+    ):   #
         """Generates output predictions for the input samples.
         Computation is done in batches.
         Arguments:
@@ -594,25 +610,17 @@ class FRCNN():
             Numpy array(s) of predictions.
         """
 
-        return self._loopSamplesAndPredictOrEvaluate(x, class_mapping,
+        return self._loopSamplesAndPredictOrEvaluate(
+            x, class_mapping,
             bbox_threshold, overlap_thresh=overlap_thres, verbose=verbose)
 
-
-    def evaluate(self,
-               x=None,
-            #    y=None,
-            #    batch_size=None,
-               verbose=2,
-            #    sample_weight=None,
-            #    steps=None,
-            #    callbacks=None,
-            #    max_queue_size=10,
-            #    workers=1,
-            #    use_multiprocessing=False,
-
-               class_mapping=None,
-               overlap_thresh=0.5
-            ):
+    def evaluate(
+        self,
+        x=None,
+        verbose=2,
+        class_mapping=None,
+        overlap_thresh=0.5
+    ):
         """Returns the mean average precision (mAP) for the model in test mode.
         Computation is done in batches.
 
@@ -630,14 +638,17 @@ class FRCNN():
             ValueError: in case of invalid arguments.
         """
 
-        return self._loopSamplesAndPredictOrEvaluate(x, class_mapping,
-            overlap_thresh=overlap_thresh, verbose=verbose, mode='evaluate')
+        return self._loopSamplesAndPredictOrEvaluate(
+            x, class_mapping, overlap_thresh=overlap_thresh, verbose=verbose, mode='evaluate')
 
+    # from profilehooks import profile
+    # @profile
+    def _loopSamplesAndPredictOrEvaluate(
+        self, samples, class_mapping, bbox_threshold=None,
+        overlap_thresh=0.5, verbose=1, mode='predict'
+    ):
 
-    def _loopSamplesAndPredictOrEvaluate(self, samples, class_mapping, bbox_threshold=None,
-        overlap_thresh=0.5, verbose=1, mode='predict'):
-
-        visualise = (verbose>1)
+        visualise = (verbose > 1)
 
         from sklearn.metrics import average_precision_score
         # predicts = []
@@ -649,16 +660,15 @@ class FRCNN():
         i = 1
         isImgData = True
 
-
         if isinstance(samples[0], dict):
             isImgData = False
 
         # For evaluation of mAP, we will need the ground-truth bboxes
-        if (mode=='evaluate' and isImgData):
+        if (mode == 'evaluate' and isImgData):
             print('For evaluate, please provide input as array of dict containing bboxes and filepath')
             raise ValueError
 
-        if (class_mapping == None):
+        if (class_mapping is None):
             print("class_mapping should not be None")
             raise ValueError
 
@@ -667,7 +677,6 @@ class FRCNN():
 
         # Assign color to each
         class_to_color = {class_mapping[v]: np.random.randint(0, 255, 3) for v in class_mapping}
-
 
         def get_map(pred, gt, f):
             T = {}
@@ -716,7 +725,7 @@ class FRCNN():
                 T[pred_class].append(int(found_match))
 
             for gt_box in gt:
-                if not gt_box['bbox_matched']:# and not gt_box['difficult']:
+                if not gt_box['bbox_matched']:  # and not gt_box['difficult']:
                     if gt_box['class'] not in P:
                         P[gt_box['class']] = []
                         T[gt_box['class']] = []
@@ -730,29 +739,36 @@ class FRCNN():
             # Calculate real coordinates on original image and save coordinates, and (key and prob) separately
             (real_x1, real_y1, real_x2, real_y2) = _get_real_coordinates(ratio, x1, y1, x2, y2)
             all_pos.append((real_x1, real_y1, real_x2, real_y2))
-            all_dets.append((key,100*new_probs[jk]))
+            all_dets.append((key, 100*new_probs[jk]))
 
             if (visualise):
-                cv2.rectangle(img_original,(real_x1, real_y1), (real_x2, real_y2), (int(class_to_color[key][0]), int(class_to_color[key][1]), int(class_to_color[key][2])),4)
-                textLabel = '{}: {}'.format(key,int(100*new_probs[jk]))
+                cv2.rectangle(
+                    img_original, (real_x1, real_y1), (real_x2, real_y2),
+                    (int(class_to_color[key][0]), int(class_to_color[key][1]), int(class_to_color[key][2])), 4)
+                textLabel = '{}: {}'.format(key, int(100*new_probs[jk]))
 
                 # (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,1,1)
                 textOrg = (real_x1, real_y1-0)
                 y = real_y1+10 if real_y1 < 10 else real_y1
                 textOrg = (real_x1, y)
-                cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255), 2, lineType=cv2.LINE_AA)
-                cv2.putText(img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+                cv2.putText(
+                    img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX,
+                    0.5, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+                cv2.putText(
+                    img_original, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX,
+                    0.5, (0, 0, 0), 1, lineType=cv2.LINE_AA)
 
         def calcEvalOutput():
             # Save coordinates, class and probability
             det = {'x1': x1, 'x2': x2, 'y1': y1, 'y2': y2, 'class': key, 'prob': new_probs[jk]}
             all_dets.append(det)
 
-        calcOutput = calcPredictOutput if mode=='predict' else calcEvalOutput   # check once, instead of every loop
+        calcOutput = calcPredictOutput if mode == 'predict' else calcEvalOutput   # check once, instead of every loop
 
-
+        overall_st = time.time()
         for data in samples:
-            if verbose and not isImgData: print('{}/{} - {}'.format(i,len(samples), data['filepath']))
+            if verbose and not isImgData:
+                print('{}/{} - {}'.format(i, len(samples), data['filepath']))
             i = i + 1
             st = time.time()
 
@@ -763,12 +779,12 @@ class FRCNN():
 
             # get output layer Y1, Y2 from the RPN and the feature maps F
             # Y1: y_rpn_cls, Y2: y_rpn_regr
-            [Y1, Y2, F] = self.predict_rpn.predict(img) ##
+            [Y1, Y2, F] = self.predict_rpn.predict(img)  #
 
             # Get bboxes by applying NMS
             # R.shape = (300, 4)
-            R = rpn_to_roi(Y1, Y2,
-                self.std_scaling, self.anchor_box_ratios, self.anchor_box_scales,self.rpn_stride,
+            R = rpn_to_roi(
+                Y1, Y2, self.std_scaling, self.anchor_box_ratios, self.anchor_box_scales, self.rpn_stride,
                 use_regr=True, overlap_thresh=0.7)
 
             # convert from (x1,y1,x2,y2) to (x,y,w,h)
@@ -785,22 +801,21 @@ class FRCNN():
                     break
 
                 if jk == R.shape[0]//self.num_rois:
-                    #pad R
+                    # pad R
                     curr_shape = ROIs.shape
-                    target_shape = (curr_shape[0],self.num_rois,curr_shape[2])
+                    target_shape = (curr_shape[0], self.num_rois, curr_shape[2])
                     ROIs_padded = np.zeros(target_shape).astype(ROIs.dtype)
                     ROIs_padded[:, :curr_shape[1], :] = ROIs
                     ROIs_padded[0, curr_shape[1]:, :] = ROIs[0, 0, :]
                     ROIs = ROIs_padded
 
-                [P_cls, P_regr] = self.predict_classifier.predict([F, ROIs]) ##
+                [P_cls, P_regr] = self.predict_classifier.predict([F, ROIs])
 
                 # Calculate bboxes coordinates on resized image
                 for ii in range(P_cls.shape[1]):
 
                     # Ignore 'bg' class
-                    if ( (bbox_threshold != None and np.max(P_cls[0, ii, :]) < bbox_threshold)
-                        or np.argmax(P_cls[0, ii, :]) == (P_cls.shape[2] - 1)):
+                    if ((bbox_threshold is not None and np.max(P_cls[0, ii, :]) < bbox_threshold) or np.argmax(P_cls[0, ii, :]) == (P_cls.shape[2] - 1)):
                         continue
 
                     # Get class name
@@ -820,7 +835,8 @@ class FRCNN():
                         tw /= self.classifier_regr_std[2]
                         th /= self.classifier_regr_std[3]
                         x, y, w, h = apply_regr(x, y, w, h, tx, ty, tw, th)
-                    except:
+                    except Exception as e:
+                        if DEBUG: print(e)
                         pass
                     bboxes[cls_name].append([self.rpn_stride*x, self.rpn_stride*y, self.rpn_stride*(x+w), self.rpn_stride*(y+h)])
                     probs[cls_name].append(np.max(P_cls[0, ii, :]))
@@ -842,12 +858,13 @@ class FRCNN():
                 print('Elapsed time = {}'.format(time.time() - st))
 
             if mode == 'predict':
-                if verbose: print(all_dets)
+                if verbose:
+                    print(all_dets)
                 if visualise:
                     # plt.figure(figsize=(10,10))
                     plt.figure()
                     plt.grid()
-                    plt.imshow(cv2.cvtColor(img_original,cv2.COLOR_BGR2RGB))
+                    plt.imshow(cv2.cvtColor(img_original, cv2.COLOR_BGR2RGB))
                     plt.show()
                 output.append((all_dets, all_pos))    # store all predictions and their positions for each image
             else:
@@ -863,12 +880,15 @@ class FRCNN():
                 for key in T.keys():
                     ap = average_precision_score(T[key], P[key])
                     all_aps.append(ap)
-                    if verbose: print('{} AP: {}'.format(key, ap))
+                    if verbose:
+                        print('{} AP: {}'.format(key, ap))
                 if verbose:
-                    print('mAP = {}'.format(np.mean(np.array(all_aps))))
+                    print('mAP = {}'.format(np.nanmean(np.array(all_aps))))
                     print()
-                output.append(np.mean(np.array(all_aps)))
+                output.append(np.nanmean(np.array(all_aps)))
 
+        if verbose:
+            print('Total elapsed time = {}'.format(time.time() - overall_st))
         output = np.asarray(output)
         return output
 
@@ -881,7 +901,7 @@ def _get_real_coordinates(ratio, x1, y1, x2, y2):
     real_x2 = int(round(x2 // ratio))
     real_y2 = int(round(y2 // ratio))
 
-    return (real_x1, real_y1, real_x2 ,real_y2)
+    return (real_x1, real_y1, real_x2, real_y2)
 
 
 def _format_img(img, img_channel_mean, img_scaling_factor, target_size):
@@ -901,7 +921,7 @@ def _format_img(img, img_channel_mean, img_scaling_factor, target_size):
 
     """ resize image based on config """
     img_min_side = float(target_size)
-    (height,width,_) = img.shape
+    (height, width, _) = img.shape
 
     if width <= height:
         ratio = img_min_side/width
@@ -931,8 +951,9 @@ def _format_img(img, img_channel_mean, img_scaling_factor, target_size):
 
 def _get_img_output_length(width, height, base_net_type='resnet50'):
     b = base_net_type
+
     def get_output_length(input_length, b):
-        if (b=='resnet50'):
+        if (b == 'resnet50'):
             # zero_pad
             input_length += 6
             # apply 4 strided convolutions
@@ -945,7 +966,7 @@ def _get_img_output_length(width, height, base_net_type='resnet50'):
         else:
             return input_length//16
 
-    return get_output_length(width,b), get_output_length(height,b)
+    return get_output_length(width, b), get_output_length(height, b)
 
 
 def _rpn(base_layers, num_anchors):
@@ -957,7 +978,8 @@ def _rpn(base_layers, num_anchors):
     x_regr = Conv2D(num_anchors * 4, (1, 1), activation='linear', kernel_initializer='zero', name='rpn_out_regress')(x)
     return [x_class, x_regr, base_layers]
 
-def _classifier(base_layers, input_rois, num_rois, nb_classes = 4, trainable=True, base_net_type='resnet50'):
+
+def _classifier(base_layers, input_rois, num_rois, nb_classes=4, trainable=True, base_net_type='resnet50'):
 
     if (base_net_type == 'resnet50'):
         pooling_regions = 14
@@ -1022,6 +1044,7 @@ def _conv_block_td(input_tensor, kernel_size, filters, stage, block, input_shape
     x = Activation('relu')(x)
     return x
 
+
 def _identity_block_td(input_tensor, kernel_size, filters, stage, block, trainable=True):
 
     # identity block time distributed
@@ -1036,7 +1059,7 @@ def _identity_block_td(input_tensor, kernel_size, filters, stage, block, trainab
     x = TimeDistributed(FixedBatchNormalization(axis=bn_axis), name=bn_name_base + '2a')(x)
     x = Activation('relu')(x)
 
-    x = TimeDistributed(Conv2D(nb_filter2, (kernel_size, kernel_size), trainable=trainable, kernel_initializer='normal',padding='same'), name=conv_name_base + '2b')(x)
+    x = TimeDistributed(Conv2D(nb_filter2, (kernel_size, kernel_size), trainable=trainable, kernel_initializer='normal', padding='same'), name=conv_name_base + '2b')(x)
     x = TimeDistributed(FixedBatchNormalization(axis=bn_axis), name=bn_name_base + '2b')(x)
     x = Activation('relu')(x)
 
@@ -1051,8 +1074,6 @@ def _identity_block_td(input_tensor, kernel_size, filters, stage, block, trainab
 
 ###############################################################################
 # Definition for custom layers
-import tensorflow.keras.backend as K
-from tensorflow.keras import initializers, regularizers
 class RoiPoolingConv(tf.keras.layers.Layer):
     '''ROI pooling layer for 2D inputs.
     See Spatial Pyramid Pooling in Deep Convolutional Networks for Visual Recognition,
@@ -1094,7 +1115,7 @@ class RoiPoolingConv(tf.keras.layers.Layer):
         # x[1] is roi with shape (num_rois,4) with ordering (x,y,w,h)
         rois = x[1]
 
-        input_shape = K.shape(img)
+        # input_shape = K.shape(img)
 
         outputs = []
 
@@ -1114,7 +1135,6 @@ class RoiPoolingConv(tf.keras.layers.Layer):
             rs = tf.image.resize_images(img[:, y:y+h, x:x+w, :], (self.pool_size, self.pool_size))
             outputs.append(rs)
 
-
         final_output = K.concatenate(outputs, axis=0)
 
         # Reshape to (1, num_rois, pool_size, pool_size, nb_channels)
@@ -1126,12 +1146,12 @@ class RoiPoolingConv(tf.keras.layers.Layer):
         # print(final_output.shape)
         return final_output
 
-
     def get_config(self):
         config = {'pool_size': self.pool_size,
                   'num_rois': self.num_rois}
         base_config = super(RoiPoolingConv, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
+
 
 class FixedBatchNormalization(tf.keras.layers.Layer):
 
@@ -1220,7 +1240,7 @@ lambda_rpn_class = 1.0
 lambda_cls_regr = 1.0
 lambda_cls_class = 1.0
 epsilon = 1e-4
-from tensorflow.keras.backend import categorical_crossentropy
+
 
 def rpn_loss_regr(num_anchors):
     """Loss function for rpn regression
@@ -1258,9 +1278,10 @@ def rpn_loss_cls(num_anchors):
         lambda * sum((binary_crossentropy(isValid*y_pred,y_true))) / N
     """
     def rpn_loss_cls_fixed_num(y_true, y_pred):
-            return lambda_rpn_class * K.sum(y_true[:, :, :, :num_anchors] * K.binary_crossentropy(y_pred[:, :, :, :], y_true[:, :, :, num_anchors:])) / K.sum(epsilon + y_true[:, :, :, :num_anchors])
+        return lambda_rpn_class * K.sum(y_true[:, :, :, :num_anchors] * K.binary_crossentropy(y_pred[:, :, :, :], y_true[:, :, :, num_anchors:])) / K.sum(epsilon + y_true[:, :, :, :num_anchors])
 
     return rpn_loss_cls_fixed_num
+
 
 def class_loss_regr(num_classes):
     """Loss function for rpn regression
@@ -1285,6 +1306,7 @@ def class_loss_cls(y_true, y_pred):
 
 ###############################################################################
 # Definitions for roi related helpers
+@jit(nopython=True)
 def calc_iou(R, img_data, classifier_overlap, im_size, rpn_stride, class_mapping, classifier_regr_std):
     """Converts from (x1,y1,x2,y2) to (x,y,w,h) format
     """
@@ -1306,7 +1328,7 @@ def calc_iou(R, img_data, classifier_overlap, im_size, rpn_stride, class_mapping
     y_class_num = []
     y_class_regr_coords = []
     y_class_regr_label = []
-    IoUs = [] # for debugging only
+    IoUs = []  # for debugging only
 
     # R.shape[0]: number of bboxes (=300 from non_max_suppression)
     for ix in range(R.shape[0]):
@@ -1328,7 +1350,7 @@ def calc_iou(R, img_data, classifier_overlap, im_size, rpn_stride, class_mapping
                 best_bbox = bbox_num
 
         if best_iou < classifier_overlap[0]:
-                continue
+            continue
         else:
             w = x2 - x1
             h = y2 - y1
@@ -1378,9 +1400,10 @@ def calc_iou(R, img_data, classifier_overlap, im_size, rpn_stride, class_mapping
     X = np.array(x_roi)
     # one hot code for bboxes from above => x_roi (X)
     Y1 = np.array(y_class_num)
-    Y2 = np.concatenate([np.array(y_class_regr_label),np.array(y_class_regr_coords)],axis=1)
+    Y2 = np.concatenate([np.array(y_class_regr_label), np.array(y_class_regr_coords)], axis=1)
 
     return np.expand_dims(X, axis=0), np.expand_dims(Y1, axis=0), np.expand_dims(Y2, axis=0), IoUs
+
 
 def apply_regr(x, y, w, h, tx, ty, tw, th):
     try:
@@ -1406,6 +1429,7 @@ def apply_regr(x, y, w, h, tx, ty, tw, th):
     except Exception as e:
         print(e)
         return x, y, w, h
+
 
 def apply_regr_np(X, T):
     try:
@@ -1437,6 +1461,7 @@ def apply_regr_np(X, T):
     except Exception as e:
         print(e)
         return X
+
 
 def non_max_suppression_fast(boxes, probs, overlap_thresh=0.9, max_boxes=300):
     # code used from here: http://www.pyimagesearch.com/2015/02/16/faster-non-maximum-suppression-python/
@@ -1494,9 +1519,9 @@ def non_max_suppression_fast(boxes, probs, overlap_thresh=0.9, max_boxes=300):
         # compute the ratio of overlap
         overlap = area_int/(area_union + 1e-6)
 
-        # delete all indexes from the index list that have
-        idxs = np.delete(idxs, np.concatenate(([last],
-            np.where(overlap > overlap_thresh)[0])))
+        # delete all indexes from the index list that are over the threshold
+        idxs = np.delete(
+            idxs, np.concatenate(([last], np.where(overlap > overlap_thresh)[0])))
 
         if len(pick) >= max_boxes:
             break
@@ -1506,8 +1531,8 @@ def non_max_suppression_fast(boxes, probs, overlap_thresh=0.9, max_boxes=300):
     probs = probs[pick]
     return boxes, probs
 
-import time
-def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box_scales, rpn_stride, use_regr=True, max_boxes=300,overlap_thresh=0.9):
+# @jit(nopython=True)
+def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box_scales, rpn_stride, use_regr=True, max_boxes=300, overlap_thresh=0.9):
 
     regr_layer = regr_layer / std_scaling
     anchor_sizes = anchor_box_scales
@@ -1527,7 +1552,7 @@ def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box
             regr = regr_layer[0, :, :, 4 * curr_layer:4 * curr_layer + 4]
             regr = np.transpose(regr, (2, 0, 1))
 
-            X, Y = np.meshgrid(np.arange(cols),np. arange(rows))
+            X, Y = np.meshgrid(np.arange(cols), np. arange(rows))
 
             A[0, :, :, curr_layer] = X - anchor_x/2
             A[1, :, :, curr_layer] = Y - anchor_y/2
@@ -1553,7 +1578,7 @@ def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box
 
             curr_layer += 1
 
-    all_boxes = np.reshape(A.transpose((0, 3, 1,2)), (4, -1)).transpose((1, 0))
+    all_boxes = np.reshape(A.transpose((0, 3, 1, 2)), (4, -1)).transpose((1, 0))
     all_probs = rpn_layer.transpose((0, 3, 1, 2)).reshape((-1))
 
     x1 = all_boxes[:, 0]
@@ -1566,21 +1591,15 @@ def rpn_to_roi(rpn_layer, regr_layer, std_scaling, anchor_box_ratios, anchor_box
     all_boxes = np.delete(all_boxes, idxs, 0)
     all_probs = np.delete(all_probs, idxs, 0)
 
-   # Apply non_max_suppression
-   # Only extract the bboxes. Don't need rpn probs in the later process
+    # Apply non_max_suppression
+    # Only extract the bboxes. Don't need rpn probs in the later process
     result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
 
     return result
 
+
 ###############################################################################
 # Data generator and data augmentation
-import numpy as np
-import cv2
-import random
-import copy
-import threading
-import itertools
-
 def union(au, bu, area_intersection):
     area_a = (au[2] - au[0]) * (au[3] - au[1])
     area_b = (bu[2] - bu[0]) * (bu[3] - bu[1])
@@ -1622,7 +1641,8 @@ def get_new_img_size(width, height, img_min_side=600):
 
     return resized_width, resized_height
 
-def augment(img_data, config, augment=True):
+
+def augment(img_data, config, augment=True, visualise=False, verbose=0):
     assert 'filepath' in img_data
     assert 'bboxes' in img_data
     assert 'width' in img_data
@@ -1632,68 +1652,93 @@ def augment(img_data, config, augment=True):
 
     img_data_aug = copy.deepcopy(img_data)
     img = cv2.imread(img_data_aug['filepath'])
+    rows, cols, channels = img.shape
+    images = np.zeros((1, rows, cols, channels), dtype=np.uint8)
 
+    images[0] = img
     if augment:
-        rows, cols = img.shape[:2]
 
-        if config.horizontal_flip and np.random.randint(0, 2) == 0:
-            img = cv2.flip(img, 1)
-            for bbox in img_data_aug['bboxes']:
-                x1 = bbox['x1']
-                x2 = bbox['x2']
-                bbox['x2'] = cols - x1
-                bbox['x1'] = cols - x2
+        np.random.seed(config.seed)
+        ia.seed(config.seed)
 
-        if config.vertical_flip and np.random.randint(0, 2) == 0:
-            img = cv2.flip(img, 0)
-            for bbox in img_data_aug['bboxes']:
-                y1 = bbox['y1']
-                y2 = bbox['y2']
-                bbox['y2'] = rows - y1
-                bbox['y1'] = rows - y2
+        if (config.translate_x):
+            try:  # 1-D array-like or int
+                tx = np.random.choice(config.translate_x)
+                tx *= np.random.choice([-1, 1])
+            except ValueError:  # floating point
+                tx = np.random.uniform(-config.translate_x, config.translate_x)
+        else:
+            tx = 0
 
-        if config.rotation_range == 90:
-            angle = np.random.choice([0,90,180,270],1)[0]
-            if angle == 270:
-                img = np.transpose(img, (1,0,2))
-                img = cv2.flip(img, 0)
-            elif angle == 180:
-                img = cv2.flip(img, -1)
-            elif angle == 90:
-                img = np.transpose(img, (1,0,2))
-                img = cv2.flip(img, 1)
-            elif angle == 0:
-                pass
+        if (config.translate_y):
+            try:  # 1-D array-like or int
+                ty = np.random.choice(config.translate_y)
+                ty *= np.random.choice([-1, 1])
+            except ValueError:  # floating point
+                ty = np.random.uniform(-config.translate_y, config.translate_y)
+        else:
+            ty = 0
 
-            for bbox in img_data_aug['bboxes']:
-                x1 = bbox['x1']
-                x2 = bbox['x2']
-                y1 = bbox['y1']
-                y2 = bbox['y2']
-                if angle == 270:
-                    bbox['x1'] = y1
-                    bbox['x2'] = y2
-                    bbox['y1'] = cols - x2
-                    bbox['y2'] = cols - x1
-                elif angle == 180:
-                    bbox['x2'] = cols - x1
-                    bbox['x1'] = cols - x2
-                    bbox['y2'] = rows - y1
-                    bbox['y1'] = rows - y2
-                elif angle == 90:
-                    bbox['x1'] = rows - y2
-                    bbox['x2'] = rows - y1
-                    bbox['y1'] = x1
-                    bbox['y2'] = x2
-                elif angle == 0:
-                    pass
+        bbox_list = [BoundingBox(x1=bbox['x1'], y1=bbox['y1'], x2=bbox['x2'], y2=bbox['y2']) for bbox in img_data_aug['bboxes']]
+        bbs = BoundingBoxesOnImage(bbox_list, images[0].shape)
 
-    img_data_aug['width'] = img.shape[1]
-    img_data_aug['height'] = img.shape[0]
-    return img_data_aug, img
+        seq = iaa.Sequential(
+            [
+                iaa.Fliplr(config.horizontal_flip),  # horizontal flips
+                iaa.Flipud(config.vertical_flip),  # vertical flips
+                iaa.Crop(percent=config.crop),  # random crops
+                # Small gaussian blur with random sigma between 0 and 0.5.
+                # But we only blur about 50% of all images.
+                iaa.Sometimes(config.blur,
+                              iaa.GaussianBlur(sigma=config.sigma)
+                              ),
+                # Strengthen or weaken the contrast in each image.
+                # iaa.ContrastNormalization(config.contrast),
+                # Add gaussian noise.
+                # For 50% of all images, we sample the noise once per pixel.
+                # For the other 50% of all images, we sample the noise per pixel AND
+                # channel. This can change the color (not only brightness) of the
+                # pixels.
+                # iaa.AdditiveGaussianNoise(loc=0, scale=(0.0, 0.05*255), per_channel=0.5),
+                # Make some images brighter and some darker.
+                # In 20% of all cases, we sample the multiplier once per channel,
+                # which can end up changing the color of the images.
+                # iaa.Multiply((0.8, 1.2), per_channel=0.2),
+                # Apply affine transformations to each image.
+                # Scale/zoom them, translate/move them, rotate them and shear them.
+                iaa.Sometimes(
+                    0.5, iaa.Affine(
+                        scale={"x": config.scale_x, "y": config.scale_y},
+                        translate_percent={"x": tx, "y": ty},
+                        rotate=config.rotate,
+                        # shear=(-8, 8)
+                    )
+                )
+            ], random_order=True)  # apply augmenters in random order
+
+        img_aug, bbs_aug = seq(images=images, bounding_boxes=bbs)
+
+        for i in range(len(bbs.bounding_boxes)):
+            before = bbs.bounding_boxes[i]
+            after = bbs_aug.bounding_boxes[i]
+            if verbose:
+                print("BB %d: (%.4f, %.4f, %.4f, %.4f) -> (%.4f, %.4f, %.4f, %.4f)"
+                      % (i, before.x1, before.y1, before.x2, before.y2, after.x1, after.y1, after.x2, after.y2))
+            img_data_aug['bboxes'][i]['x1'] = int(after.x1)
+            img_data_aug['bboxes'][i]['y1'] = int(after.y1)
+            img_data_aug['bboxes'][i]['x2'] = int(after.x2)
+            img_data_aug['bboxes'][i]['y2'] = int(after.y2)
+
+        # bbs.draw_on_image(img, size=100)
+        # bbs_aug.draw_on_image(img_aug, size=100, color=[0, 0, 255])
+
+    img_data_aug['width'] = images[0].shape[1]
+    img_data_aug['height'] = images[0].shape[0]
+    return img_data_aug, img_aug[0]
 
 
-def calc_rpn(img_data, width, height, resized_width, resized_height, output_width, output_height,
+def calc_rpn(
+    img_data, width, height, resized_width, resized_height, output_width, output_height,
     rpn_stride, anchor_sizes, anchor_ratios, rpn_min_overlap, rpn_max_overlap
 ):
     downscale = float(rpn_stride)
@@ -1777,8 +1822,8 @@ def calc_rpn(img_data, width, height, resized_width, resized_height, output_widt
                             if curr_iou > best_iou_for_bbox[bbox_num]:
                                 best_anchor_for_bbox[bbox_num] = [jy, ix, anchor_ratio_idx, anchor_size_idx]
                                 best_iou_for_bbox[bbox_num] = curr_iou
-                                best_x_for_bbox[bbox_num,:] = [x1_anc, x2_anc, y1_anc, y2_anc]
-                                best_dx_for_bbox[bbox_num,:] = [tx, ty, tw, th]
+                                best_x_for_bbox[bbox_num, :] = [x1_anc, x2_anc, y1_anc, y2_anc]
+                                best_dx_for_bbox[bbox_num, :] = [tx, ty, tw, th]
 
                             # we set the anchor to positive if the IOU is >0.7 (it does not matter if there was another better box, it just indicates overlap)
                             if curr_iou > rpn_max_overlap:
@@ -1816,14 +1861,12 @@ def calc_rpn(img_data, width, height, resized_width, resized_height, output_widt
             if best_anchor_for_bbox[idx, 0] == -1:
                 continue
             y_is_box_valid[
-                best_anchor_for_bbox[idx,0], best_anchor_for_bbox[idx,1], best_anchor_for_bbox[idx,2] + n_anchratios *
-                best_anchor_for_bbox[idx,3]] = 1
+                best_anchor_for_bbox[idx, 0], best_anchor_for_bbox[idx, 1], best_anchor_for_bbox[idx, 2] + n_anchratios * best_anchor_for_bbox[idx, 3]] = 1
             y_rpn_overlap[
-                best_anchor_for_bbox[idx,0], best_anchor_for_bbox[idx,1], best_anchor_for_bbox[idx,2] + n_anchratios *
-                best_anchor_for_bbox[idx,3]] = 1
-            start = 4 * (best_anchor_for_bbox[idx,2] + n_anchratios * best_anchor_for_bbox[idx,3])
+                best_anchor_for_bbox[idx, 0], best_anchor_for_bbox[idx, 1], best_anchor_for_bbox[idx, 2] + n_anchratios * best_anchor_for_bbox[idx, 3]] = 1
+            start = 4 * (best_anchor_for_bbox[idx, 2] + n_anchratios * best_anchor_for_bbox[idx, 3])
             y_rpn_regr[
-                best_anchor_for_bbox[idx,0], best_anchor_for_bbox[idx,1], start:start+4] = best_dx_for_bbox[idx, :]
+                best_anchor_for_bbox[idx, 0], best_anchor_for_bbox[idx, 1], start:start+4] = best_dx_for_bbox[idx, :]
 
     y_rpn_overlap = np.transpose(y_rpn_overlap, (2, 0, 1))
     y_rpn_overlap = np.expand_dims(y_rpn_overlap, axis=0)
@@ -1858,7 +1901,6 @@ def calc_rpn(img_data, width, height, resized_width, resized_height, output_widt
     return np.copy(y_rpn_cls), np.copy(y_rpn_regr), num_pos
 
 
-
 ###############################################################################
 # Utilities
 class dotdict(dict):
@@ -1873,10 +1915,10 @@ class dotdict(dict):
 ###############################################################################
 def preprocess_input(x_img):
     # Zero-center by mean pixel, and preprocess image
-    img_channel_mean=[103.939, 116.779, 123.68]
-    img_scaling_factor=1
+    img_channel_mean = [103.939, 116.779, 123.68]
+    img_scaling_factor = 1
 
-    x_img = x_img[:,:, (2, 1, 0)]  # BGR -> RGB
+    x_img = x_img[:, :, (2, 1, 0)]  # BGR -> RGB
     x_img = x_img.astype(np.float32)
     x_img[:, :, 0] -= img_channel_mean[0]
     x_img[:, :, 1] -= img_channel_mean[1]
@@ -1893,23 +1935,32 @@ def FRCNNGenerator(
     all_img_data,
     mode='train',
     shuffle=True,
-    horizontal_flip=False,
-    vertical_flip=False,
-    rotation_range=0,
+
+    horizontal_flip=False,       #
+    vertical_flip=False,        #
+    rotation_range=0,   #
+    width_shift_range=0,
+    height_shift_range=0,
+    crop=0.0,
+    blur=0.0,                # gaussian blur probability
+    sigma=0.0,               # gaussian blur sigma
+    scale_x=1.0,
+    scale_y=1.0,
+    seed=1,
     # img_channel_mean=[103.939, 116.779, 123.68],
     # img_scaling_factor=1,
     std_scaling=4,
     target_size=600,
 
     rpn_stride=16,
-    anchor_box_scales=[128,256,512],
-    anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
-    rpn_min_overlap = 0.3,
-    rpn_max_overlap = 0.7,
+    anchor_box_scales=[128, 256, 512],
+    anchor_box_ratios=[[1, 1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]],
+    rpn_min_overlap=0.3,
+    rpn_max_overlap=0.7,
 
-    base_net_type='resnet50',
+    base_net_type='vgg',
     preprocessing_function=preprocess_input
-    ):
+):
     """ Generates batch of image data with real-time data augmentation for FRCNN model
     Yield the ground-truth anchors as Y (labels)
 
@@ -1917,9 +1968,37 @@ def FRCNNGenerator(
         all_img_data: list(filepath, width, height, list(bboxes))
         mode: 'train' or 'test'; 'train' mode need augmentation.
         shuffle: Boolean. Whether to shuffle the data.
+
         horizontal_flip: Boolean. Randomly flip inputs horizontally.
         vertical_flip: Boolean. Randomly flip inputs vertically.
-        rotation_range: Int. Degree range for random rotations (only 0 or 90 currently)
+        rotation_range: Int or Tuple (min, max). Degree range for random rotations
+        width_shift_range: Float, 1-D array-like or int
+            - float: fraction of total width, if < 1, or pixels if >= 1.
+            - 1-D array-like: random elements from the array.
+            - int: integer number of pixels from interval
+                `(-width_shift_range, +width_shift_range)`
+            - With `width_shift_range=2` possible values
+                are integers `[-1, 0, +1]`,
+                same as with `width_shift_range=[-1, 0, +1]`,
+                while with `width_shift_range=1.0` possible values are floats
+                in the interval [-1.0, +1.0).
+        height_shift_range: Float, 1-D array-like or int
+            - float: fraction of total height, if < 1, or pixels if >= 1.
+            - 1-D array-like: random elements from the array.
+            - int: integer number of pixels from interval
+                `(-height_shift_range, +height_shift_range)`
+            - With `height_shift_range=2` possible values
+                are integers `[-1, 0, +1]`,
+                same as with `height_shift_range=[-1, 0, +1]`,
+                while with `height_shift_range=1.0` possible values are floats
+                in the interval [-1.0, +1.0).
+        crop: The number of pixels to crop away (cut off) on each side of the image given *in percent* of the image height/width.  E.g. if this is set to 0.1, the augmenter will always crop away 10 percent of the image's height at the top, 10 percent of the width on the right, 10 percent of the height at the bottom and 10 percent of the width on the left.
+        blur: Probability of augmentation with gaussian blur
+        sigma: Sigma parameter for gaussian blur
+        scale_x: Rescaling factor along x-axis
+        scale_y: Rescaling factor along y-axis
+        seed: Int (default: 1). Random seed.
+
         target_size: shorter-side length. Used for image resizing based on the shorter length
         std_scaling: For scaling of standard deviation
         target_size: Integer. Shorter-side length. Used for image resizing based on the shorter length.
@@ -1942,13 +2021,24 @@ def FRCNNGenerator(
         num_pos: show number of positive anchors for debug
     """
     config = {
-        'horizontal_flip': horizontal_flip,
-        'vertical_flip': vertical_flip,
-        'rotation_range': rotation_range
+        'horizontal_flip': 0.5 if horizontal_flip else 0.0,
+        'vertical_flip': 0.5 if vertical_flip else 0.0,
+        'rotate': rotation_range if (type(rotation_range) == tuple and len(rotation_range) == 2) else (-abs(rotation_range), abs(rotation_range)),
+        'translate_x': width_shift_range,
+        'translate_y': height_shift_range,
+        'crop': crop,
+        'blur': blur,
+        'sigma': sigma,
+
+        # 'contrast': contrast,
+        'scale_x': scale_x,
+        'scale_y': scale_y,
+
+        'seed': seed
     }
 
     if shuffle:
-        np.random.seed(1)
+        np.random.seed(seed)
         np.random.shuffle(all_img_data)
 
     while True:
@@ -1986,7 +2076,7 @@ def FRCNNGenerator(
                     continue
 
                 # Preprocessing function
-                if (preprocessing_function != None):
+                if (preprocessing_function is not None):
                     x_img = preprocessing_function(x_img)
 
                 y_rpn_regr[:, y_rpn_regr.shape[1]//2:, :, :] *= std_scaling
@@ -1998,8 +2088,6 @@ def FRCNNGenerator(
             except Exception as e:
                 print(e)
                 continue
-
-
 
 
 # Parser for annotations
@@ -2029,8 +2117,8 @@ def parseAnnotationFile(input_path, verbose=1, visualise=True, mode='simple', fi
     else:
         all_data, classes_count, class_mapping = parseAnnotationFileVOC(input_path, verbose, filteredList)
 
-    sorted_classes = sorted(classes_count.items(), key = lambda kv:(kv[1], kv[0]), reverse=True)
-    sorted_classes = list(filter(lambda c: c[1]>0, sorted_classes))
+    sorted_classes = sorted(classes_count.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
+    sorted_classes = list(filter(lambda c: c[1] > 0, sorted_classes))
     if (verbose):
         print()
         print()
@@ -2038,11 +2126,11 @@ def parseAnnotationFile(input_path, verbose=1, visualise=True, mode='simple', fi
         # print({v: k for k, v in class_mapping.items()})
         # print(list(class_mapping.keys()))
         print(sorted_classes)
-        print('Total classes: ' + str(len(class_mapping)))
-        print('Spend %0.2f mins to load the data' % ((time.time()-st)/60) )
+        print('Total classes: ' + str(len(sorted_classes)))
+        print('Spend %0.2f mins to load the data' % ((time.time()-st)/60))
 
     if (visualise):
-        plt.figure(figsize=(8,8))
+        plt.figure(figsize=(8, 8))
         plt.title('Distribution of classes for %s' % (input_path))
         plt.bar([i[0] for i in sorted_classes], [i[1] for i in sorted_classes])
         plt.show()
@@ -2058,39 +2146,40 @@ def parseAnnotationFileSimple(input_path, verbose=1, filteredList=None):
     class_mapping = {}
     i = 1
 
-    with open(input_path,'r') as f:
+    with open(input_path, 'r') as f:
 
-        if verbose: print('Parsing annotation files')
+        if verbose:
+            print('Parsing annotation files')
         for line in f:
             sys.stdout.write('\r'+'idx=' + str(i))
             i += 1
 
             line_split = line.strip().split(',')
-            (filename,x1,y1,x2,y2,class_name) = line_split
+            (filename, x1, y1, x2, y2, class_name) = line_split
 
-            if (filteredList !=None and (not class_name in filteredList)):
+            if (filteredList is not None and (class_name not in filteredList)):
                 continue    # If not one of our classes of interest, we ignore
-
-            if class_name not in classes_count:
-                classes_count[class_name] = 1
-            else:
-                classes_count[class_name] += 1
-
-            if class_name not in class_mapping:
-                if class_name == 'bg' and found_bg == False:
-                    if verbose: print('Found class name with special name bg. Will be treated as a background region (this is usually for hard negative mining).')
-                    found_bg = True
-                class_mapping[class_name] = len(class_mapping)
-
 
             filename = filename.replace('\\', '/')  # in case backslash is used, we will replace with forward slash instead
             if (not os.path.isfile(filename)):
                 print("\n" + filename + " could not be read")
             else:
 
+                if class_name not in classes_count:
+                    classes_count[class_name] = 1
+                else:
+                    classes_count[class_name] += 1
+
+                if class_name not in class_mapping:
+                    if class_name == 'bg' and found_bg is False:
+                        if verbose:
+                            print('Found class name with special name bg. Will be treated as a background region (this is usually for hard negative mining).')
+                        found_bg = True
+                    class_mapping[class_name] = len(class_mapping)
+
                 if filename not in all_imgs:
                     img = cv2.imread(filename)
-                    (rows,cols) = img.shape[:2]
+                    (rows, cols) = img.shape[:2]
 
                     all_imgs[filename] = {
                         'filepath': filename,
@@ -2131,16 +2220,17 @@ def parseAnnotationFileVOC(input_path, verbose=1, filteredList=None):
     all_imgs = []
     classes_count = {}
     class_mapping = {}
-    data_paths = [os.path.join(input_path,s) for s in ['VOC2012']]
+    data_paths = [os.path.join(input_path, s) for s in ['VOC2012']]
     # data_paths = [os.path.join(input_path,s) for s in ['VOC2007', 'VOC2012']]
 
-    if verbose: print('Parsing annotation files')
+    if verbose:
+        print('Parsing annotation files')
 
     for data_path in data_paths:
         annot_path = os.path.join(data_path, 'Annotations')
         imgs_path = os.path.join(data_path, 'JPEGImages')
-        imgsets_path_trainval = os.path.join(data_path, 'ImageSets','Main','trainval.txt')
-        imgsets_path_test = os.path.join(data_path, 'ImageSets','Main','test.txt')
+        imgsets_path_trainval = os.path.join(data_path, 'ImageSets', 'Main', 'trainval.txt')
+        imgsets_path_test = os.path.join(data_path, 'ImageSets', 'Main', 'test.txt')
 
         trainval_files = []
         test_files = []
@@ -2190,7 +2280,7 @@ def parseAnnotationFileVOC(input_path, verbose=1, filteredList=None):
                 for element_obj in element_objs:
                     class_name = element_obj.find('name').text
 
-                    if (filteredList !=None and (not class_name in filteredList)):
+                    if (filteredList is not None and (class_name not in filteredList)):
                         continue    # If not one of our classes of interest, we ignore
 
                     if class_name not in classes_count:
@@ -2228,8 +2318,12 @@ def parseAnnotationFileVOC(input_path, verbose=1, filteredList=None):
 
     return all_imgs, classes_count, class_mapping
 
+
 # Inspect generator
-def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,512], anchor_box_ratios=[[1,1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]):
+def inspect(
+    generator, target_size, rpn_stride=16, anchor_box_scales=[128, 256, 512],
+    anchor_box_ratios=[[1, 1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]
+):
     """ Based on generator, prints details of image, ground-truth annotations, as well as positive anchors
     Args:
         generator: Generator that was created via FRCNNGenerator
@@ -2244,9 +2338,9 @@ def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,51
     from matplotlib import pyplot as plt
 
     X, Y, image_data, debug_img, debug_num_pos = next(generator)
-    print('Original image: height=%d width=%d'%(image_data['height'], image_data['width']))
-    print('Resized image:  height=%d width=%d im_size=%d'%(X.shape[1], X.shape[2], target_size))
-    print('Feature map size: height=%d width=%d rpn_stride=%d'%(Y[0].shape[1], Y[0].shape[2], rpn_stride))
+    print('Original image: height=%d width=%d' % (image_data['height'], image_data['width']))
+    print('Resized image:  height=%d width=%d im_size=%d' % (X.shape[1], X.shape[2], target_size))
+    print('Feature map size: height=%d width=%d rpn_stride=%d' % (Y[0].shape[1], Y[0].shape[2], rpn_stride))
     print(X.shape)
     print(str(len(Y))+" includes 'y_rpn_cls' and 'y_rpn_regr'")
     print('Shape of y_rpn_cls {}'.format(Y[0].shape))
@@ -2254,7 +2348,7 @@ def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,51
     print(image_data)
 
     print('Number of positive anchors for this image: %d' % (debug_num_pos))
-    if debug_num_pos==0:
+    if debug_num_pos == 0:
         gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['height']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['height'])
         gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['width']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['width'])
         gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
@@ -2271,13 +2365,13 @@ def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,51
         plt.show()
     else:
         cls = Y[0][0]
-        pos_cls = np.where(cls==1)
+        pos_cls = np.where(cls == 1)
         print(pos_cls)
         regr = Y[1][0]
-        pos_regr = np.where(regr==1)
+        pos_regr = np.where(regr == 1)
         print(pos_regr)
-        print('y_rpn_cls for possible pos anchor: {}'.format(cls[pos_cls[0][0],pos_cls[1][0],:]))
-        print('y_rpn_regr for positive anchor: {}'.format(regr[pos_regr[0][0],pos_regr[1][0],:]))
+        print('y_rpn_cls for possible pos anchor: {}'.format(cls[pos_cls[0][0], pos_cls[1][0], :]))
+        print('y_rpn_regr for positive anchor: {}'.format(regr[pos_regr[0][0], pos_regr[1][0], :]))
 
         gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['width']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['width'])
         gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['height']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['height'])
@@ -2292,10 +2386,10 @@ def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,51
 
         # Add text
         textLabel = 'gt bbox'
-        (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,0.5,1)
+        (retval, baseLine) = cv2.getTextSize(textLabel, cv2.FONT_HERSHEY_COMPLEX, 0.5, 1)
         textOrg = (gt_x1, gt_y1+5)
         cv2.rectangle(img, (textOrg[0] - 5, textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (0, 0, 0), 2)
-        cv2.rectangle(img, (textOrg[0] - 5,textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (255, 255, 255), -1)
+        cv2.rectangle(img, (textOrg[0] - 5, textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (255, 255, 255), -1)
         cv2.putText(img, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1)
 
         # Draw positive anchors according to the y_rpn_regr
@@ -2305,7 +2399,7 @@ def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,51
 
             idx = pos_regr[2][i*4]/4
             anchor_size = anchor_box_scales[int(idx/3)]
-            anchor_ratio = anchor_box_ratios[2-int((idx+1)%3)]
+            anchor_ratio = anchor_box_ratios[2-int((idx+1) % 3)]
 
             center = (pos_regr[1][i*4]*rpn_stride, pos_regr[0][i*4]*rpn_stride)
             print('Center position of positive anchor: ', center)
@@ -2315,7 +2409,7 @@ def inspect(generator, target_size, rpn_stride=16, anchor_box_scales=[128,256,51
     #         cv2.putText(img, 'pos anchor bbox '+str(i+1), (center[0]-int(anc_w/2), center[1]-int(anc_h/2)-5), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
 
     print('Green bboxes is ground-truth bbox. Others are positive anchors')
-    plt.figure(figsize=(8,8))
+    plt.figure(figsize=(8, 8))
     plt.grid()
     plt.imshow(img)
     plt.show()
@@ -2333,23 +2427,23 @@ def viewAnnotatedImage(annotation_file, query_image_path):
         None
     """
     from matplotlib import pyplot as plt
-    import matplotlib.colors as mcolors
+    # import matplotlib.colors as mcolors
 
-    annotations = pd.read_csv(annotation_file, sep = ',', names = ['image_name','x1','y1','x2','y2','Object_type'])
+    annotations = pd.read_csv(annotation_file, sep=',', names=['image_name', 'x1', 'y1', 'x2', 'y2', 'Object_type'])
     class_mapping = annotations['Object_type'].unique()
-    class_mapping = { class_mapping[i] : i for i in range(0, len(class_mapping) ) }
-    num_classes = len(class_mapping) # annotations['Object_type'].nunique()
+    class_mapping = {class_mapping[i]: i for i in range(0, len(class_mapping))}
+    num_classes = len(class_mapping)  # annotations['Object_type'].nunique()
 
     colorset = np.random.uniform(0, 255, size=(num_classes, 3))
     img = plt.imread(query_image_path)
 
-    maxVal = 255
+    # maxVal = 255
     if (img.max() <= 1):
         colorset /= 255
-        maxVal = 1
+        # maxVal = 1
 
     fig = plt.figure()
-    ax = fig.add_axes([0,0,1,1])
+    fig.add_axes([0, 0, 1, 1])
     plt.imshow(img)
 
     windows_resize_image_path_file = query_image_path.replace('/', '\\')  # just in case annotation file is in windows directory format
@@ -2376,9 +2470,9 @@ def viewAnnotatedImage(annotation_file, query_image_path):
 
         # Calculate perceived luminance: https://www.w3.org/TR/AERT/#color-contrast
         # so that we can use a contrasting outline color.
-        r,g,b = t[2]
+        r, g, b = t[2]
         perceivedLum = (0.299*r + 0.587*g + 0.114*b)/255
-        outlineColor = (0,0,0) if perceivedLum > 0.5 else (255,255,255)
+        outlineColor = (0, 0, 0) if perceivedLum > 0.5 else (255, 255, 255)
 
         cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, outlineColor, 2, cv2.LINE_AA)
         cv2.putText(img, t[0], t[1], cv2.FONT_HERSHEY_DUPLEX, 0.5, t[2], 1, cv2.LINE_AA)
@@ -2389,18 +2483,19 @@ def viewAnnotatedImage(annotation_file, query_image_path):
 
     return None
 
+
 def plotAccAndLoss(csv_path):
     from matplotlib import pyplot as plt
 
     record_df = pd.read_csv(csv_path)
     r_epochs = len(record_df)
 
-    plt.figure(figsize=(15,5))
-    plt.subplot(4,2,1)
+    plt.figure(figsize=(15, 5))
+    plt.subplot(4, 2, 1)
     plt.plot(np.arange(0, r_epochs), record_df['mean_overlapping_bboxes'], 'r')
     plt.title('mean_overlapping_bboxes')
 
-    plt.subplot(4,2,2)
+    plt.subplot(4, 2, 2)
     plt.plot(np.arange(0, r_epochs), record_df['class_acc'], 'r')
     plt.title('class_acc')
 
@@ -2408,33 +2503,34 @@ def plotAccAndLoss(csv_path):
 
     # plt.figure(figsize=(15,5))
 
-    plt.subplot(4,2,3)
+    plt.subplot(4, 2, 3)
     plt.plot(np.arange(0, r_epochs), record_df['loss_rpn_cls'], 'r')
     plt.title('loss_rpn_cls')
 
-    plt.subplot(4,2,4)
+    plt.subplot(4, 2, 4)
     plt.plot(np.arange(0, r_epochs), record_df['loss_rpn_regr'], 'r')
     plt.title('loss_rpn_regr')
     # plt.show()
     # plt.figure(figsize=(15,5))
-    plt.subplot(4,2,5)
+    plt.subplot(4, 2, 5)
     plt.plot(np.arange(0, r_epochs), record_df['loss_class_cls'], 'r')
     plt.title('loss_class_cls')
 
-    plt.subplot(4,2,6)
+    plt.subplot(4, 2, 6)
     plt.plot(np.arange(0, r_epochs), record_df['loss_class_regr'], 'r')
     plt.title('loss_class_regr')
     # plt.show()
     # plt.figure(figsize=(15,5))
-    plt.subplot(4,2,7)
+    plt.subplot(4, 2, 7)
     plt.plot(np.arange(0, r_epochs), record_df['curr_loss'], 'r')
     plt.title('total_loss')
 
-    plt.subplot(4,2,8)
+    plt.subplot(4, 2, 8)
     plt.plot(np.arange(0, r_epochs), record_df['elapsed_time'], 'r')
     plt.title('elapsed_time')
 
     plt.show()
+
 
 def convertDataToImg(all_data, verbose=1):
     """Converts all_data from parseAnnotationFile into a list of img
@@ -2452,13 +2548,14 @@ def convertDataToImg(all_data, verbose=1):
     if verbose:
         print('Retrieving images from filepaths')
         progbar = utils.Progbar(len(all_data))
+
         def readImg(i, name, opt):
             # print(i)
             progbar.update(i)
             return cv2.imread(name, opt)
 
         test_imgs = [readImg(i, all_data[i]['filepath'], cv2.IMREAD_UNCHANGED) for i in range(len(all_data))]
-        progbar.update(len(all_data)) # update with last value after finishing list comprehension
+        progbar.update(len(all_data))  # update with last value after finishing list comprehension
         print('')
     else:
         test_imgs = [cv2.imread(d['filepath'], cv2.IMREAD_UNCHANGED) for d in all_data]

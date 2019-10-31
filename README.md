@@ -18,10 +18,9 @@
   <p align="center">
     Faster R-CNN for tensorflow keras, packaged as a library
     <br />
-    <a href="https://github.com/eleow/tfKerasFRCNN"><strong>Explore the docs »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/eleow/tfKerasFRCNN">View Demo</a>
+    <a href="https://github.com/eleow/tfKerasFRCNN/blob/master/_TrainAndTestFRCNN.ipynb">View Jupyter Demo</a>
     ·
     <a href="https://github.com/eleow/tfKerasFRCNN/issues">Report Bug</a>
     ·
@@ -41,20 +40,124 @@ In order to make things easier for the user, we have also included useful featur
 
 ### Pre-requisites and Dependencies
 
-The dependencies for the library is shown in the figure below.
+The dependencies for the library is shown in the figure below (Created via [pydeps](https://pydeps.readthedocs.io/en/latest/) using command
+`pydeps FRCNN.py --max-bacon=4 --cluster)`)
 ![Dependencies](misc/pydeps.png)
 
-Created via [pydeps](https://pydeps.readthedocs.io/en/latest/) using command
-```
-pydeps FRCNN.py --max-bacon=4 --cluster)
-```
+
 
 ### Installation
-See "conda setup.txt" for installation instructions
+- Install prerequisites following instructions in "conda setup.txt"
+- Clone this repo:
+
+```sh
+git clone https://github.com/eleow/tfKerasFRCNN.git
+```
 
 ## Usage
 
 See [_TrainAndTestFRCNN.py](https://github.com/eleow/tfKerasFRCNN/blob/master/_TrainAndTestFRCNN.py) or [_TrainAndTestFRCNN.ipynb](https://github.com/eleow/tfKerasFRCNN/blob/master/_TrainAndTestFRCNN.ipynb) for end-to-end example of how to use the library
+
+### 1. Parse annotation files
+
+If using annotation file in 'simple' format (ie. each line of the annotation file should contain filepath,x1,y1,x2,y2,class_name), parsing annotation file is as simple as:
+
+```python
+from FRCNN import parseAnnotationFile
+train_data, classes_count, class_mapping = parseAnnotationFile(annotation_train_path)
+```
+
+If using Pascal VOC dataset, and filtering for certain classes of interest
+
+```python
+from FRCNN import parseAnnotationFile
+annotation_path = './Dataset VOC'
+classes_of_interest = ['bicycle', 'bus', 'car', 'motorbike', 'person']
+train_data, classes_count, class_mapping = parseAnnotationFile(annotation_path, mode='voc', filteredList=classes_of_interest)
+```
+
+### 2. View annotated image based on annotation file (simple format only)
+
+```python
+from FRCNN import viewAnnotatedImage
+viewAnnotatedImage(annotation_train_path, 'path_to_image/image.png')
+```
+
+![Sample Annotated Image](misc/viewAnnotatedImage.png)
+
+### 3. Create model
+
+You could create a FRCNN model with the default parameters used in the paper like this:
+
+```python
+from FRCNN import FRCNN
+frcnn = FRCNN(base_net_type='vgg', num_classes = len(classes_count))
+frcnn.compile()
+```
+
+Alternatively, specify the parameters
+
+```python
+frcnn = FRCNN(input_shape=(None,None,3), num_anchors=num_anchors, num_rois=num_rois, base_net_type=base_net_type, num_classes = len(classes_count))
+frcnn.compile()
+```
+
+### 4. Train model
+
+First create the iterator for your dataset
+
+```python
+from FRCNN import FRCNNGenerator, inspect, preprocess_input
+train_it = FRCNNGenerator(train_data,
+    target_size= im_size,
+    horizontal_flip=True, vertical_flip = False, rotation_range = 0,
+    shuffle=False, base_net_type=base_net_type
+)
+```
+
+Then start training with
+
+```python
+# train model - initial_epoch = -1 --> will automatically resume training if csv and model already exists
+steps = 1000
+frcnn.fit_generator(train_it, target_size = im_size, class_mapping = class_mapping, epochs=num_epochs, steps_per_epoch=steps,
+    model_path=model_path, csv_path=csv_path, initial_epoch=-1)
+```
+
+### 5. Test model
+
+First create model for testing. Remember to load weights!
+(Note: class mapping and num_classes should be based on training set)
+
+```python
+from FRCNN import FRCNN
+frcnn_test = FRCNN(input_shape=(None,None,3), num_anchors=num_anchors, num_rois=num_rois, base_net_type=base_net_type, num_classes = len(classes_count))
+frcnn_test.load_config(anchor_box_scales=anchor_box_scales, anchor_box_ratios=anchor_box_ratios, num_rois=num_rois, target_size=im_size)
+frcnn_test.load_weights(model_path)
+frcnn_test.compile()
+```
+
+Then perform predictions
+
+```python
+predicts = frcnn_test.predict(test_imgs, class_mapping=class_mapping, verbose=2, bbox_threshold=0.5, overlap_thres=0.2)
+```
+
+![Sample prediction](misc/predict.png)
+
+### 6. Evaluate model
+
+Get mAP for your test dataset by
+
+```python
+evaluate = frcnn_test.evaluate(test_data, class_mapping=class_mapping)
+print(np.nanmean(np.array(evaluate)))`
+```
+
+## Troubleshooting
+
+- If you run out of memory, try reducing number of ROIs that are processing simultaneously.
+- Alternatively, reduce image size from default value of 600. Remember to scale your anchor_box_scales accordingly as well.
 
 
 ## License
@@ -62,9 +165,10 @@ Distributed under the [MIT License](LICENSE)
 
 ## Acknowledgements
 Code was modified and refactored from original code by [RockyXu66](https://github.com/RockyXu66/Faster_RCNN_for_Open_Images_Dataset_Keras) and [kbardool](https://github.com/kbardool/keras-frcnn)
+Default values were mostly based on 
 
 
-<div>Shoes icon by <a href="https://www.flaticon.com/authors/freepik" title="Freepik">Freepik</a> from <a href="https://www.flaticon.com/"         title="Flaticon">www.flaticon.com</a></div>
+<div>Shoes icon by <a href="https://www.flaticon.com/authors/freepik" title="Freepik">Freepik</a> from <a href="https://www.flaticon.com/" title="Flaticon">www.flaticon.com</a></div>
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
