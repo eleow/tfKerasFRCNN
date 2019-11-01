@@ -99,8 +99,13 @@ class FRCNN():  # class FRCNN(tf.keras.Model):
             # base_net.layers.pop() # does not work - https://github.com/tensorflow/tensorflow/issues/22479
             feature_network = base_net.layers[-2].output
             num_features = 512
+
+        # For Resnet50, the last stage (stage 5) is also removed
         else:
-            feature_network = base_net.outputs[0]
+            # feature_network = base_net.outputs[0]
+            # lastStage = max([i if 'res5a_branch2a' in x.name else 0 for i,x in enumerate(base_net.layers)]) - 1
+            lastStage = 142
+            feature_network = base_net.layers[lastStage].output
             num_features = 1024
 
         self.feature_network = feature_network
@@ -953,7 +958,7 @@ def _get_img_output_length(width, height, base_net_type='resnet50'):
     b = base_net_type
 
     def get_output_length(input_length, b):
-        if (b == 'resnet50'):
+        if ('resnet'in b):
             # zero_pad
             input_length += 6
             # apply 4 strided convolutions
@@ -981,10 +986,10 @@ def _rpn(base_layers, num_anchors):
 
 def _classifier(base_layers, input_rois, num_rois, nb_classes=4, trainable=True, base_net_type='resnet50'):
 
-    if (base_net_type == 'resnet50'):
+    if ('resnet' in base_net_type):
         pooling_regions = 14
         input_shape = (num_rois, pooling_regions, pooling_regions, 1024)
-        out_roi_pool = RoiPoolingConv(pooling_regions, num_rois)([base_layers, input_rois], name='roi_pooling_conv')
+        out_roi_pool = RoiPoolingConv(pooling_regions, num_rois, name='roi_pooling_conv')([base_layers, input_rois])
 
         # out = _classifier_layers(out_roi_pool, input_shape=input_shape, trainable=True)
         trainable = True
@@ -1306,7 +1311,7 @@ def class_loss_cls(y_true, y_pred):
 
 ###############################################################################
 # Definitions for roi related helpers
-@jit(nopython=True)
+# @jit(nopython=True)
 def calc_iou(R, img_data, classifier_overlap, im_size, rpn_stride, class_mapping, classifier_regr_std):
     """Converts from (x1,y1,x2,y2) to (x,y,w,h) format
     """

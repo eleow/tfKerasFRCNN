@@ -87,7 +87,7 @@ viewAnnotatedImage(annotation_train_path, 'path_to_image/image.png')
 
 ### 3. Create model
 
-You could create a FRCNN model with the default parameters used in the paper like this:
+You could create a FRCNN model with the default parameters used in the paper like this. Currently, only 'vgg' and 'resnet50' feature networks are supported.
 
 ```python
 from FRCNN import FRCNN
@@ -165,7 +165,8 @@ Distributed under the [MIT License](LICENSE)
 
 ## Acknowledgements
 Code was modified and refactored from original code by [RockyXu66](https://github.com/RockyXu66/Faster_RCNN_for_Open_Images_Dataset_Keras) and [kbardool](https://github.com/kbardool/keras-frcnn)
-Default values were mostly based on 
+
+Default values are mostly based on original paper by [Shaoqing Ren, Kaiming He, Ross B. Girshick, Jian Sun](https://arxiv.org/abs/1506.01497)
 
 
 <div>Shoes icon by <a href="https://www.flaticon.com/authors/freepik" title="Freepik">Freepik</a> from <a href="https://www.flaticon.com/" title="Flaticon">www.flaticon.com</a></div>
