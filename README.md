@@ -42,7 +42,7 @@ In order to make things easier for the user, we have also included useful featur
 
 The dependencies for the library is shown in the figure below (Created via [pydeps](https://pydeps.readthedocs.io/en/latest/) using command
 `pydeps FRCNN.py --max-bacon=4 --cluster)`)
-![Dependencies](misc/pydeps.png)
+![Dependencies](misc/pydeps.png | height=100px)
 
 
 
@@ -175,11 +175,12 @@ predicts = frcnn_test.predict(test_imgs2, class_mapping=class_mapping, verbose=2
 
 ### 6. Evaluate model
 
-Get mAP based on VOC Pascal 2012 Challenge for your test dataset
+Get mAP based on VOC Pascal 2012 Challenge for your test dataset, and display predictions (red boxes) and ground-truth boxes (green boxes).
 
 ```python
-evaluate = frcnn_test.evaluate(test_data, class_mapping=class_mapping)
+evaluate = frcnn_test.evaluate(test_data, class_mapping=class_mapping, verbose=2)
 ```
+![Sample prediction](misc/evaluate.png)
 
 ## Troubleshooting
 
