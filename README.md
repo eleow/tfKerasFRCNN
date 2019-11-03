@@ -115,7 +115,7 @@ train_it = FRCNNGenerator(train_data,
 )
 ```
 
-Then start training with
+Then start training
 
 ```python
 # train model - initial_epoch = -1 --> will automatically resume training if csv and model already exists
@@ -124,7 +124,16 @@ frcnn.fit_generator(train_it, target_size = im_size, class_mapping = class_mappi
     model_path=model_path, csv_path=csv_path, initial_epoch=-1)
 ```
 
-### 5. Test model
+### 5. View results of training
+
+You can view the records of training and view the accuracy and loss
+
+```python
+from FRCNN import plotAccAndLoss
+plotAccAndLoss(csv_path)
+```
+
+### 6. Test model
 
 First create model for testing. Remember to load weights!
 (Note: class mapping and num_classes should be based on training set)
@@ -137,21 +146,39 @@ frcnn_test.load_weights(model_path)
 frcnn_test.compile()
 ```
 
-Then perform predictions
+Perform predictions using test_data (first output from parseAnnotationFile, containing path to the images files)
 
 ```python
+predicts = frcnn_test.predict(test_data, class_mapping=class_mapping, verbose=2, bbox_threshold=0.5, overlap_thres=0.2)
+```
+
+Alternatively, pass in samples as an array of img data.
+
+```python
+from FRCNN import convertDataToImg
+test_imgs = convertDataToImg(test_data)
 predicts = frcnn_test.predict(test_imgs, class_mapping=class_mapping, verbose=2, bbox_threshold=0.5, overlap_thres=0.2)
+```
+
+Or if images are in a folder without an annotation file
+
+```python
+import cv2
+imgPaths = [os.path.join('./pathToImages', s) for s in os.listdir('./pathToImages')]
+test_imgs2 = []
+for path in imgPaths:
+  test_imgs2.append(cv2.imread(path, cv2.IMREAD_UNCHANGED))
+predicts = frcnn_test.predict(test_imgs2, class_mapping=class_mapping, verbose=2, bbox_threshold=0.5, overlap_thres=0.2)
 ```
 
 ![Sample prediction](misc/predict.png)
 
 ### 6. Evaluate model
 
-Get mAP for your test dataset by
+Get mAP based on VOC Pascal 2012 Challenge for your test dataset
 
 ```python
 evaluate = frcnn_test.evaluate(test_data, class_mapping=class_mapping)
-print(np.nanmean(np.array(evaluate)))`
 ```
 
 ## Troubleshooting
@@ -164,7 +191,9 @@ print(np.nanmean(np.array(evaluate)))`
 Distributed under the [MIT License](LICENSE)
 
 ## Acknowledgements
-Code was modified and refactored from original code by [RockyXu66](https://github.com/RockyXu66/Faster_RCNN_for_Open_Images_Dataset_Keras) and [kbardool](https://github.com/kbardool/keras-frcnn)
+Faster RCNN code is modified and refactored based on original code by [RockyXu66](https://github.com/RockyXu66/Faster_RCNN_for_Open_Images_Dataset_Keras) and [kbardool](https://github.com/kbardool/keras-frcnn)
+
+Calculation of object detection metrics from [Rafael Padilla](https://github.com/rafaelpadilla/Object-Detection-Metrics)
 
 Default values are mostly based on original paper by [Shaoqing Ren, Kaiming He, Ross B. Girshick, Jian Sun](https://arxiv.org/abs/1506.01497)
 
