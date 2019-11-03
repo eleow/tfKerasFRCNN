@@ -211,7 +211,7 @@ Default values are mostly based on original paper by [Shaoqing Ren, Kaiming He, 
 [issues-shield]: https://img.shields.io/github/issues/eleow/tfKerasFRCNN
 [issues-url]: https://github.com/eleow/tfKerasFRCNN/issues
 [license-shield]: https://img.shields.io/github/license/eleow/tfKerasFRCNN
-[license-url]: https://github.com/eleow/tfKerasFRCNN/blob/master/LICENSE.txt
+[license-url]: https://github.com/eleow/tfKerasFRCNN/blob/master/LICENSE
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=flat-square&logo=linkedin&colorB=555
 [linkedin-url]: https://linkedin.com/in/edmundleow
 [product-screenshot]: images/screenshot.png
