@@ -42,7 +42,7 @@ In order to make things easier for the user, we have also included useful featur
 
 The dependencies for the library is shown in the figure below (Created via [pydeps](https://pydeps.readthedocs.io/en/latest/) using command
 `pydeps FRCNN.py --max-bacon=4 --cluster)`)
-![Dependencies](misc/pydeps.png | height=100px)
+![Dependencies](misc/pydeps.png)
 
 
 
